@@ -103,18 +103,19 @@ runs:
             ;;
         esac
 
-        BINARY_NAME="gh-workflow${EXT}"
+        BINARY_NAME="gh-workflow-${OS}-${ARCH}${EXT}"
+        TARGET_BINARY="gh-workflow${EXT}"
 
         # Check if binary already exists
-        if [ -f "${{ github.action_path }}/$BINARY_NAME" ]; then
-          echo "✅ Binary already exists: $BINARY_NAME"
+        if [ -f "${{ github.action_path }}/$TARGET_BINARY" ]; then
+          echo "✅ Binary already exists: $TARGET_BINARY"
         else
           echo "📥 Downloading gh-workflow binary for $OS-$ARCH..."
           
           # Get the latest release download URL
           # Note: Update this URL to match your actual GitHub repository
           REPO_URL="https://github.com/mseptiaan/gh-workflow"
-          RELEASE_URL="${REPO_URL}/releases/latest/download/gh-workflow-${OS}-${ARCH}${EXT}"
+          RELEASE_URL="${REPO_URL}/releases/latest/download/$BINARY_NAME"
           
           # Download the binary
           echo "🔗 Downloading from: $RELEASE_URL"
@@ -135,17 +136,19 @@ runs:
           fi
           
           echo "✅ Successfully downloaded: $BINARY_NAME"
-        fi
+          
+          # Make it executable
+          chmod +x "${{ github.action_path }}/$BINARY_NAME"
 
-        # Make it executable
-        chmod +x "${{ github.action_path }}/$BINARY_NAME"
-
-        # Create a symlink or copy without extension for compatibility
-        if [ "$EXT" = ".exe" ]; then
-          cp "${{ github.action_path }}/$BINARY_NAME" "${{ github.action_path }}/gh-workflow"
-          chmod +x "${{ github.action_path }}/gh-workflow"
-        else
-          ln -sf "${{ github.action_path }}/$BINARY_NAME" "${{ github.action_path }}/gh-workflow"
+          # Create a symlink or copy to the target binary name
+          if [ "$EXT" = ".exe" ]; then
+            cp "${{ github.action_path }}/$BINARY_NAME" "${{ github.action_path }}/$TARGET_BINARY"
+          else
+            ln -sf "${{ github.action_path }}/$BINARY_NAME" "${{ github.action_path }}/$TARGET_BINARY"
+          fi
+          
+          # Make target binary executable
+          chmod +x "${{ github.action_path }}/$TARGET_BINARY"
         fi
 
         # Add to PATH
