@@ -366,7 +366,7 @@ func terminateEC2Instance(instanceID string) error {
 }
 
 var rootCmd = &cobra.Command{
-	Use:   "github-runner",
+	Use:   "gh-workflow",
 	Short: "A CLI tool to manage GitHub Actions EC2 runners",
 	Long:  "A command-line tool to create and terminate EC2 instances for GitHub Actions runners",
 }

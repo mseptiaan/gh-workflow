@@ -205,21 +205,77 @@ You can also use the tool directly from the command line.
 
 ## Building
 
+### Quick Build
+
 ```bash
 # Build the application
-go build -o github-runner .
+go build -o gh-workflow .
 
 # Or build for different platforms
-GOOS=linux GOARCH=amd64 go build -o github-runner-linux .
-GOOS=windows GOARCH=amd64 go build -o github-runner-windows.exe .
+GOOS=linux GOARCH=amd64 go build -o gh-workflow-linux .
+GOOS=windows GOARCH=amd64 go build -o gh-workflow-windows.exe .
 ```
+
+### Multi-Platform Build Script
+
+Use the provided build script to build binaries for all supported platforms:
+
+```bash
+# Build for all platforms
+./build.sh
+
+# The script will create binaries in the 'build/' directory with names like:
+# gh-workflow-linux-amd64
+# gh-workflow-linux-arm64
+# gh-workflow-darwin-amd64
+# gh-workflow-darwin-arm64
+# gh-workflow-windows-amd64.exe
+# gh-workflow-windows-arm64.exe
+```
+
+The build script supports the following platforms:
+- Linux (AMD64, ARM64, 386)
+- macOS/Darwin (AMD64, ARM64) 
+- Windows (AMD64, ARM64, 386)
+
+### Creating GitHub Releases
+
+Use the provided release script to create GitHub releases with pre-built binaries:
+
+```bash
+# Create a new release with binaries
+./release.sh -v v1.0.0 -t "Release v1.0.0" -n "Initial release" -b
+
+# Create a draft release
+./release.sh -v v1.0.1 -b -d
+
+# Upload binaries to an existing release
+./release.sh -v v1.0.0 -u
+
+# Build and create a prerelease
+./release.sh -v v1.0.0-beta.1 -b -p
+```
+
+Release script options:
+- `-v, --version VERSION` - Release version (required)
+- `-t, --title TITLE` - Release title (optional)
+- `-n, --notes NOTES` - Release notes (optional)
+- `-d, --draft` - Create as draft release
+- `-p, --prerelease` - Create as prerelease
+- `-b, --build` - Build binaries before release
+- `-u, --upload-only` - Only upload to existing release
+
+**Requirements for release script:**
+- [GitHub CLI](https://cli.github.com/) must be installed
+- You must be authenticated with GitHub CLI (`gh auth login`)
+- Go must be installed for building
 
 ## CLI Usage
 
 ### Create an EC2 Instance
 
 ```bash
-./github-runner create \
+./gh-workflow create \
   --github-token YOUR_GITHUB_PERSONAL_ACCESS_TOKEN \
   --image-id ami-0c55b159cbfafe1d0 \
   --instance-type t3.nano \
@@ -234,18 +290,18 @@ GOOS=windows GOARCH=amd64 go build -o github-runner-windows.exe .
 ### Terminate an EC2 Instance
 
 ```bash
-./github-runner terminate --instance-id i-1234567890abcdef0
+./gh-workflow terminate --instance-id i-1234567890abcdef0
 ```
 
 ### Help
 
 ```bash
 # General help
-./github-runner --help
+./gh-workflow --help
 
 # Help for specific commands
-./github-runner create --help
-./github-runner terminate --help
+./gh-workflow create --help
+./gh-workflow terminate --help
 ```
 
 ## Command Line Options
