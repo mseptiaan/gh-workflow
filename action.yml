@@ -40,10 +40,6 @@ inputs:
   instance-id:
     description: "EC2 instance ID (for stop mode)"
     required: false
-  aws-region:
-    description: "AWS region"
-    required: false
-    default: "us-east-1"
 
 outputs:
   label:
@@ -219,8 +215,7 @@ runs:
           echo "  --labels \"$UNIQUE_LABEL\" \\"
           echo "  --pre-runner-script \"${{ inputs.pre-runner-script }}\" \\"
           echo "  --runner-name \"$RUNNER_NAME\" \\"
-          echo "  --output-format \"github-actions\" \\"
-          echo "  --aws-region \"${{ inputs.aws-region }}\""
+          echo "  --output-format \"github-actions\""
           
           # Create EC2 instance and capture output
           set +e  # Don't exit on error so we can capture the output
@@ -235,8 +230,7 @@ runs:
             --labels "$UNIQUE_LABEL" \
             --pre-runner-script "${{ inputs.pre-runner-script }}" \
             --runner-name "$RUNNER_NAME" \
-            --output-format "github-actions" \
-            --aws-region "${{ inputs.aws-region }}" 2>&1)
+            --output-format "github-actions" 2>&1)
           EXIT_CODE=$?
           set -e  # Re-enable exit on error
           
@@ -261,8 +255,7 @@ runs:
           
           $BINARY_PATH terminate \
             --instance-id "${{ inputs.instance-id }}" \
-            --output-format "github-actions" \
-            --aws-region "${{ inputs.aws-region }}"
+            --output-format "github-actions"
           
         else
           echo "❌ Invalid mode: ${{ inputs.mode }}. Must be 'start' or 'stop'"

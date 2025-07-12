@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -18,7 +17,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/spf13/cobra"
-	"gopkg.in/ini.v1"
 )
 
 var (
@@ -34,7 +32,6 @@ var (
 	preRunnerScript string
 	runnerName      string
 	outputFormat    string
-	awsRegion       string
 )
 
 // GitHubRegistrationTokenResponse represents the response from GitHub API
@@ -88,31 +85,15 @@ func getGitHubRegistrationToken(githubToken, repoOwner, repoName string) (string
 	return tokenResponse.Token, nil
 }
 
-// loadAWSCredentials loads AWS credentials from ~/.aws/credentials
+// loadAWSCredentials loads AWS credentials from environment variables
 func loadAWSCredentials() (aws.CredentialsProvider, error) {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get home directory: %v", err)
-	}
-
-	credentialsPath := filepath.Join(homeDir, ".aws", "credentials")
-
-	// Check if credentials file exists
-	if _, err := os.Stat(credentialsPath); os.IsNotExist(err) {
-		return nil, fmt.Errorf("AWS credentials file not found at %s", credentialsPath)
-	}
-
-	cfg, err := ini.Load(credentialsPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load AWS credentials: %v", err)
-	}
-
-	section := cfg.Section("default")
-	accessKeyID := section.Key("aws_access_key_id").String()
-	secretAccessKey := section.Key("aws_secret_access_key").String()
+	accessKeyID := os.Getenv("AWS_ACCESS_KEY_ID")
+	secretAccessKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
 
 	if accessKeyID == "" || secretAccessKey == "" {
-		return nil, fmt.Errorf("AWS credentials not found in credentials file")
+		return nil, fmt.Errorf(
+			"AWS credentials not found in environment variables (AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY required)",
+		)
 	}
 
 	return credentials.NewStaticCredentialsProvider(accessKeyID, secretAccessKey, ""), nil
@@ -125,7 +106,11 @@ func createEC2Client() (*ec2.Client, error) {
 		return nil, err
 	}
 
-	region := awsRegion
+	// Check for region from environment variables, default to us-east-1 if not set
+	region := os.Getenv("AWS_REGION")
+	if region == "" {
+		region = os.Getenv("AWS_DEFAULT_REGION")
+	}
 	if region == "" {
 		region = "us-east-1" // Default region
 	}
@@ -451,13 +436,11 @@ func init() {
 	createCmd.Flags().StringVar(&runnerName, "runner-name", "", "Name for the GitHub Actions runner")
 	createCmd.Flags().
 		StringVar(&outputFormat, "output-format", "", "Output format (github-actions for GitHub Actions compatibility)")
-	createCmd.Flags().StringVar(&awsRegion, "aws-region", "us-east-1", "AWS region")
 
 	// Terminate command flags
 	terminateCmd.Flags().StringVar(&instanceID, "instance-id", "", "EC2 instance ID to terminate")
 	terminateCmd.Flags().
 		StringVar(&outputFormat, "output-format", "", "Output format (github-actions for GitHub Actions compatibility)")
-	terminateCmd.Flags().StringVar(&awsRegion, "aws-region", "us-east-1", "AWS region")
 
 	// Add commands to root
 	rootCmd.AddCommand(createCmd)
