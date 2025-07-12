@@ -179,7 +179,8 @@ runs:
 
         if [ "${{ inputs.mode }}" = "start" ]; then
           # Generate unique label for this run
-          UNIQUE_LABEL="${{ inputs.labels }},run-${{ github.run_number }}-${{ github.run_attempt }}"
+          LABEL_PREFIX="${{ inputs.labels }}"
+          UNIQUE_LABEL="run-${{ github.run_number }}-${{ github.run_attempt }}"
           RUNNER_NAME="runner-${{ github.run_number }}-${{ github.run_attempt }}-$(date +%s)"
           
           # Set default values if not provided
@@ -206,7 +207,7 @@ runs:
             --security-group "${{ inputs.security-group }}" \
             --repo-owner "$REPO_OWNER" \
             --repo-name "$REPO_NAME" \
-            --labels "$UNIQUE_LABEL" \
+            --labels "$LABEL_PREFIX,$UNIQUE_LABEL" \
             --pre-runner-script "${{ inputs.pre-runner-script }}" \
             --runner-name "$RUNNER_NAME" \
             --output-format "github-actions" 2>&1)
