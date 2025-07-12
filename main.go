@@ -330,22 +330,9 @@ func terminateEC2Instance(instanceID string) error {
 			fmt.Printf("Current State: %s\n", currentState)
 		}
 
-		// Wait for instance to be terminated
-		if outputFormat != "github-actions" {
-			fmt.Printf("⏳ Waiting for instance to be terminated...\n")
-		}
-		waiter := ec2.NewInstanceTerminatedWaiter(svc)
-		err = waiter.Wait(context.TODO(), &ec2.DescribeInstancesInput{
-			InstanceIds: []string{instanceID},
-		}, time.Minute*5)
-		if err != nil {
-			if outputFormat != "github-actions" {
-				fmt.Printf("⚠️  Termination initiated but failed to wait for terminated state: %v\n", err)
-			}
-		} else {
-			if outputFormat != "github-actions" {
-				fmt.Printf("🎉 Instance %s has been terminated!\n", instanceID)
-			}
+		// If currentState is "shutting-down", return. Otherwise, wait until "shutting-down" or "terminated".
+		if currentState == "shutting-down" {
+			return nil
 		}
 	}
 
