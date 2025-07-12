@@ -59,6 +59,11 @@ outputs:
 runs:
   using: "composite"
   steps:
+    - name: Setup Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: "1.21"
+
     - name: Setup GitHub Runner EC2 Manager
       shell: bash
       run: |
