@@ -1,0 +1,139 @@
+name: "GitHub Actions EC2 Runner"
+description: "Create and terminate EC2 instances for GitHub Actions self-hosted runners"
+branding:
+  icon: "server"
+  color: "blue"
+
+inputs:
+  mode:
+    description: "Mode: start or stop"
+    required: true
+  github-token:
+    description: "GitHub personal access token"
+    required: true
+  image-id:
+    description: "EC2 AMI image ID"
+    required: false
+  instance-type:
+    description: "EC2 instance type"
+    required: false
+    default: "t3.micro"
+  subnet-id:
+    description: "VPC subnet ID"
+    required: false
+  security-group:
+    description: "Security group ID"
+    required: false
+  repo-owner:
+    description: "GitHub repository owner"
+    required: false
+  repo-name:
+    description: "GitHub repository name"
+    required: false
+  labels:
+    description: "Runner labels (comma-separated)"
+    required: false
+    default: "self-hosted,linux,x64"
+  pre-runner-script:
+    description: "Pre-runner script to execute before runner setup"
+    required: false
+  instance-id:
+    description: "EC2 instance ID (for stop mode)"
+    required: false
+  aws-region:
+    description: "AWS region"
+    required: false
+    default: "us-east-1"
+
+outputs:
+  label:
+    description: "Generated unique label for the runner"
+    value: ${{ steps.execute-runner.outputs.label }}
+  ec2-instance-id:
+    description: "EC2 instance ID of the created runner"
+    value: ${{ steps.execute-runner.outputs.ec2-instance-id }}
+  runner-name:
+    description: "Name of the GitHub Actions runner"
+    value: ${{ steps.execute-runner.outputs.runner-name }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Setup GitHub Runner EC2 Manager
+      shell: bash
+      run: |
+        # Download or build the github-runner binary
+        if [ ! -f "${{ github.action_path }}/github-runner" ]; then
+          echo "Building github-runner binary..."
+          cd "${{ github.action_path }}"
+          go build -o github-runner .
+        fi
+
+        # Make it executable
+        chmod +x "${{ github.action_path }}/github-runner"
+
+        # Add to PATH
+        echo "${{ github.action_path }}" >> $GITHUB_PATH
+
+    - name: Execute GitHub Runner Action
+      id: execute-runner
+      shell: bash
+      run: |
+        cd "${{ github.action_path }}"
+
+        if [ "${{ inputs.mode }}" = "start" ]; then
+          # Generate unique label for this run
+          UNIQUE_LABEL="${{ inputs.labels }},run-${{ github.run_number }}-${{ github.run_attempt }}"
+          RUNNER_NAME="runner-${{ github.run_number }}-${{ github.run_attempt }}-$(date +%s)"
+          
+          # Set default values if not provided
+          REPO_OWNER="${{ inputs.repo-owner }}"
+          REPO_NAME="${{ inputs.repo-name }}"
+          
+          if [ -z "$REPO_OWNER" ]; then
+            REPO_OWNER="${{ github.repository_owner }}"
+          fi
+          
+          if [ -z "$REPO_NAME" ]; then
+            REPO_NAME="${{ github.event.repository.name }}"
+          fi
+          
+          echo "🚀 Starting EC2 runner with label: $UNIQUE_LABEL"
+          
+          # Create EC2 instance and capture output
+          OUTPUT=$(./github-runner create \
+            --github-token "${{ inputs.github-token }}" \
+            --image-id "${{ inputs.image-id }}" \
+            --instance-type "${{ inputs.instance-type }}" \
+            --subnet-id "${{ inputs.subnet-id }}" \
+            --security-group "${{ inputs.security-group }}" \
+            --repo-owner "$REPO_OWNER" \
+            --repo-name "$REPO_NAME" \
+            --labels "$UNIQUE_LABEL" \
+            --pre-runner-script "${{ inputs.pre-runner-script }}" \
+            --runner-name "$RUNNER_NAME" \
+            --output-format "github-actions" \
+            --aws-region "${{ inputs.aws-region }}" 2>&1)
+          
+          echo "$OUTPUT"
+          
+          # Extract instance ID from output
+          INSTANCE_ID=$(echo "$OUTPUT" | grep "Instance ID:" | cut -d' ' -f3)
+          
+          # Set outputs
+          echo "label=$UNIQUE_LABEL" >> $GITHUB_OUTPUT
+          echo "ec2-instance-id=$INSTANCE_ID" >> $GITHUB_OUTPUT
+          echo "runner-name=$RUNNER_NAME" >> $GITHUB_OUTPUT
+          
+        elif [ "${{ inputs.mode }}" = "stop" ]; then
+          echo "🛑 Stopping EC2 runner: ${{ inputs.instance-id }}"
+          
+          ./github-runner terminate \
+            --instance-id "${{ inputs.instance-id }}" \
+            --output-format "github-actions" \
+            --aws-region "${{ inputs.aws-region }}"
+          
+        else
+          echo "❌ Invalid mode: ${{ inputs.mode }}. Must be 'start' or 'stop'"
+          exit 1
+        fi
