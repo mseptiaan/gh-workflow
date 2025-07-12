@@ -200,7 +200,24 @@ runs:
           
           echo "🚀 Starting EC2 runner with label: $UNIQUE_LABEL"
           
+          # Debug: Show the command that will be executed
+          echo "🔍 Executing command:"
+          echo "$BINARY_PATH create \\"
+          echo "  --github-token [REDACTED] \\"
+          echo "  --image-id \"${{ inputs.image-id }}\" \\"
+          echo "  --instance-type \"${{ inputs.instance-type }}\" \\"
+          echo "  --subnet-id \"${{ inputs.subnet-id }}\" \\"
+          echo "  --security-group \"${{ inputs.security-group }}\" \\"
+          echo "  --repo-owner \"$REPO_OWNER\" \\"
+          echo "  --repo-name \"$REPO_NAME\" \\"
+          echo "  --labels \"$UNIQUE_LABEL\" \\"
+          echo "  --pre-runner-script \"${{ inputs.pre-runner-script }}\" \\"
+          echo "  --runner-name \"$RUNNER_NAME\" \\"
+          echo "  --output-format \"github-actions\" \\"
+          echo "  --aws-region \"${{ inputs.aws-region }}\""
+          
           # Create EC2 instance and capture output
+          set +e  # Don't exit on error so we can capture the output
           OUTPUT=$($BINARY_PATH create \
             --github-token "${{ inputs.github-token }}" \
             --image-id "${{ inputs.image-id }}" \
@@ -214,8 +231,16 @@ runs:
             --runner-name "$RUNNER_NAME" \
             --output-format "github-actions" \
             --aws-region "${{ inputs.aws-region }}" 2>&1)
+          EXIT_CODE=$?
+          set -e  # Re-enable exit on error
           
+          echo "📄 Command output:"
           echo "$OUTPUT"
+          
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "❌ Command failed with exit code: $EXIT_CODE"
+            exit $EXIT_CODE
+          fi
           
           # Extract instance ID from output
           INSTANCE_ID=$(echo "$OUTPUT" | grep "Instance ID:" | cut -d' ' -f3)
