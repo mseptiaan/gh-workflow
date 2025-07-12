@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -11,10 +12,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/spf13/cobra"
 	"gopkg.in/ini.v1"
 )
@@ -87,7 +89,7 @@ func getGitHubRegistrationToken(githubToken, repoOwner, repoName string) (string
 }
 
 // loadAWSCredentials loads AWS credentials from ~/.aws/credentials
-func loadAWSCredentials() (*credentials.Credentials, error) {
+func loadAWSCredentials() (aws.CredentialsProvider, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get home directory: %v", err)
@@ -113,11 +115,11 @@ func loadAWSCredentials() (*credentials.Credentials, error) {
 		return nil, fmt.Errorf("AWS credentials not found in credentials file")
 	}
 
-	return credentials.NewStaticCredentials(accessKeyID, secretAccessKey, ""), nil
+	return credentials.NewStaticCredentialsProvider(accessKeyID, secretAccessKey, ""), nil
 }
 
-// createEC2Session creates an AWS session with credentials
-func createEC2Session() (*session.Session, error) {
+// createEC2Client creates an AWS EC2 client with credentials
+func createEC2Client() (*ec2.Client, error) {
 	creds, err := loadAWSCredentials()
 	if err != nil {
 		return nil, err
@@ -128,15 +130,17 @@ func createEC2Session() (*session.Session, error) {
 		region = "us-east-1" // Default region
 	}
 
-	sess, err := session.NewSession(&aws.Config{
-		Region:      aws.String(region),
-		Credentials: creds,
-	})
+	cfg, err := config.LoadDefaultConfig(context.TODO(),
+		config.WithRegion(region),
+		config.WithCredentialsProvider(creds),
+	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create AWS session: %v", err)
+		return nil, fmt.Errorf("failed to load AWS config: %v", err)
 	}
 
-	return sess, nil
+	fmt.Println("AWS Region: ", region)
+
+	return ec2.NewFromConfig(cfg), nil
 }
 
 // generateUserData creates a comprehensive user data script for GitHub Actions runner
@@ -202,12 +206,10 @@ func createEC2Instance(
 		return fmt.Errorf("failed to get GitHub registration token: %v", err)
 	}
 
-	sess, err := createEC2Session()
+	svc, err := createEC2Client()
 	if err != nil {
 		return err
 	}
-
-	svc := ec2.New(sess)
 
 	// Generate comprehensive user data script with registration token
 	userData := generateUserData(registrationToken, repoOwner, repoName, runnerLabels, preRunnerScript, runnerName)
@@ -217,18 +219,18 @@ func createEC2Instance(
 
 	runInput := &ec2.RunInstancesInput{
 		ImageId:      aws.String(imageID),
-		MinCount:     aws.Int64(1),
-		MaxCount:     aws.Int64(1),
-		InstanceType: aws.String(instanceType),
+		MinCount:     aws.Int32(1),
+		MaxCount:     aws.Int32(1),
+		InstanceType: types.InstanceType(instanceType),
 		SubnetId:     aws.String(subnetID),
-		SecurityGroupIds: []*string{
-			aws.String(securityGroupID),
+		SecurityGroupIds: []string{
+			securityGroupID,
 		},
 		UserData: aws.String(userDataEncoded),
-		TagSpecifications: []*ec2.TagSpecification{
+		TagSpecifications: []types.TagSpecification{
 			{
-				ResourceType: aws.String("instance"),
-				Tags: []*ec2.Tag{
+				ResourceType: types.ResourceTypeInstance,
+				Tags: []types.Tag{
 					{
 						Key:   aws.String("Name"),
 						Value: aws.String(fmt.Sprintf("GitHub Actions Runner - %s/%s", repoOwner, repoName)),
@@ -257,7 +259,7 @@ func createEC2Instance(
 	if outputFormat != "github-actions" {
 		fmt.Printf("🚀 Launching EC2 instance...\n")
 	}
-	result, err := svc.RunInstances(runInput)
+	result, err := svc.RunInstances(context.TODO(), runInput)
 	if err != nil {
 		return fmt.Errorf("failed to create EC2 instance: %v", err)
 	}
@@ -287,9 +289,10 @@ func createEC2Instance(
 		if outputFormat != "github-actions" {
 			fmt.Printf("⏳ Waiting for instance to be running...\n")
 		}
-		err = svc.WaitUntilInstanceRunning(&ec2.DescribeInstancesInput{
-			InstanceIds: []*string{aws.String(instanceID)},
-		})
+		waiter := ec2.NewInstanceRunningWaiter(svc)
+		err = waiter.Wait(context.TODO(), &ec2.DescribeInstancesInput{
+			InstanceIds: []string{instanceID},
+		}, time.Minute*5)
 		if err != nil {
 			if outputFormat != "github-actions" {
 				fmt.Printf("⚠️  Instance created but failed to wait for running state: %v\n", err)
@@ -307,35 +310,33 @@ func createEC2Instance(
 
 // terminateEC2Instance terminates the specified EC2 instance
 func terminateEC2Instance(instanceID string) error {
-	sess, err := createEC2Session()
+	svc, err := createEC2Client()
 	if err != nil {
 		return err
 	}
 
-	svc := ec2.New(sess)
-
 	// First, describe the instance to check if it exists
 	describeInput := &ec2.DescribeInstancesInput{
-		InstanceIds: []*string{aws.String(instanceID)},
+		InstanceIds: []string{instanceID},
 	}
 
-	_, err = svc.DescribeInstances(describeInput)
+	_, err = svc.DescribeInstances(context.TODO(), describeInput)
 	if err != nil {
 		return fmt.Errorf("failed to find instance %s: %v", instanceID, err)
 	}
 
 	// Terminate the instance
 	terminateInput := &ec2.TerminateInstancesInput{
-		InstanceIds: []*string{aws.String(instanceID)},
+		InstanceIds: []string{instanceID},
 	}
 
-	result, err := svc.TerminateInstances(terminateInput)
+	result, err := svc.TerminateInstances(context.TODO(), terminateInput)
 	if err != nil {
 		return fmt.Errorf("failed to terminate instance %s: %v", instanceID, err)
 	}
 
 	if len(result.TerminatingInstances) > 0 {
-		currentState := *result.TerminatingInstances[0].CurrentState.Name
+		currentState := string(result.TerminatingInstances[0].CurrentState.Name)
 
 		if outputFormat == "github-actions" {
 			fmt.Printf("Termination Status: %s\n", currentState)
@@ -348,9 +349,10 @@ func terminateEC2Instance(instanceID string) error {
 		if outputFormat != "github-actions" {
 			fmt.Printf("⏳ Waiting for instance to be terminated...\n")
 		}
-		err = svc.WaitUntilInstanceTerminated(&ec2.DescribeInstancesInput{
-			InstanceIds: []*string{aws.String(instanceID)},
-		})
+		waiter := ec2.NewInstanceTerminatedWaiter(svc)
+		err = waiter.Wait(context.TODO(), &ec2.DescribeInstancesInput{
+			InstanceIds: []string{instanceID},
+		}, time.Minute*5)
 		if err != nil {
 			if outputFormat != "github-actions" {
 				fmt.Printf("⚠️  Termination initiated but failed to wait for terminated state: %v\n", err)
@@ -455,6 +457,7 @@ func init() {
 	terminateCmd.Flags().StringVar(&instanceID, "instance-id", "", "EC2 instance ID to terminate")
 	terminateCmd.Flags().
 		StringVar(&outputFormat, "output-format", "", "Output format (github-actions for GitHub Actions compatibility)")
+	terminateCmd.Flags().StringVar(&awsRegion, "aws-region", "us-east-1", "AWS region")
 
 	// Add commands to root
 	rootCmd.AddCommand(createCmd)

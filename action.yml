@@ -143,8 +143,9 @@ runs:
         # Create a symlink or copy without extension for compatibility
         if [ "$EXT" = ".exe" ]; then
           cp "${{ github.action_path }}/$BINARY_NAME" "${{ github.action_path }}/gh-workflow"
+          chmod +x "${{ github.action_path }}/gh-workflow"
         else
-          ln -sf "$BINARY_NAME" "${{ github.action_path }}/gh-workflow"
+          ln -sf "${{ github.action_path }}/$BINARY_NAME" "${{ github.action_path }}/gh-workflow"
         fi
 
         # Add to PATH
