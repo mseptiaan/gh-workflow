@@ -179,6 +179,12 @@ runs:
         # Make sure binary is executable
         chmod +x "$BINARY_PATH"
 
+        # Set HOME environment variable if not defined
+        if [ -z "$HOME" ]; then
+          export HOME="/tmp"
+          echo "🏠 Set HOME environment variable to: $HOME"
+        fi
+
         echo "✅ Using binary: $BINARY_PATH"
 
         if [ "${{ inputs.mode }}" = "start" ]; then
