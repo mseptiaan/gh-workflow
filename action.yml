@@ -158,10 +158,6 @@ runs:
       run: |
         cd "${{ github.action_path }}"
 
-        # Debug: Check if binary exists and is executable
-        echo "🔍 Checking binary status..."
-        ls -la gh-workflow* || echo "No gh-workflow binaries found"
-
         # Determine binary name
         if [ -f "gh-workflow" ]; then
           BINARY_PATH="./gh-workflow"
@@ -180,8 +176,6 @@ runs:
           export HOME="/tmp"
           echo "🏠 Set HOME environment variable to: $HOME"
         fi
-
-        echo "✅ Using binary: $BINARY_PATH"
 
         if [ "${{ inputs.mode }}" = "start" ]; then
           # Generate unique label for this run
@@ -202,21 +196,6 @@ runs:
           
           echo "🚀 Starting EC2 runner with label: $UNIQUE_LABEL"
           
-          # Debug: Show the command that will be executed
-          echo "🔍 Executing command:"
-          echo "$BINARY_PATH create \\"
-          echo "  --github-token [REDACTED] \\"
-          echo "  --image-id \"${{ inputs.image-id }}\" \\"
-          echo "  --instance-type \"${{ inputs.instance-type }}\" \\"
-          echo "  --subnet-id \"${{ inputs.subnet-id }}\" \\"
-          echo "  --security-group \"${{ inputs.security-group }}\" \\"
-          echo "  --repo-owner \"$REPO_OWNER\" \\"
-          echo "  --repo-name \"$REPO_NAME\" \\"
-          echo "  --labels \"$UNIQUE_LABEL\" \\"
-          echo "  --pre-runner-script \"${{ inputs.pre-runner-script }}\" \\"
-          echo "  --runner-name \"$RUNNER_NAME\" \\"
-          echo "  --output-format \"github-actions\""
-          
           # Create EC2 instance and capture output
           set +e  # Don't exit on error so we can capture the output
           OUTPUT=$($BINARY_PATH create \
@@ -233,9 +212,6 @@ runs:
             --output-format "github-actions" 2>&1)
           EXIT_CODE=$?
           set -e  # Re-enable exit on error
-          
-          echo "📄 Command output:"
-          echo "$OUTPUT"
           
           if [ $EXIT_CODE -ne 0 ]; then
             echo "❌ Command failed with exit code: $EXIT_CODE"
