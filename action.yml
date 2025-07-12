@@ -144,7 +144,7 @@ runs:
           if [ "$EXT" = ".exe" ]; then
             cp "${{ github.action_path }}/$BINARY_NAME" "${{ github.action_path }}/$TARGET_BINARY"
           else
-            ln -sf "${{ github.action_path }}/$BINARY_NAME" "${{ github.action_path }}/$TARGET_BINARY"
+            ln -sf "$BINARY_NAME" "${{ github.action_path }}/$TARGET_BINARY"
           fi
           
           # Make target binary executable
@@ -161,6 +161,25 @@ runs:
       shell: bash
       run: |
         cd "${{ github.action_path }}"
+
+        # Debug: Check if binary exists and is executable
+        echo "🔍 Checking binary status..."
+        ls -la gh-workflow* || echo "No gh-workflow binaries found"
+
+        # Determine binary name
+        if [ -f "gh-workflow" ]; then
+          BINARY_PATH="./gh-workflow"
+        elif [ -f "gh-workflow.exe" ]; then
+          BINARY_PATH="./gh-workflow.exe"
+        else
+          echo "❌ No gh-workflow binary found"
+          exit 1
+        fi
+
+        # Make sure binary is executable
+        chmod +x "$BINARY_PATH"
+
+        echo "✅ Using binary: $BINARY_PATH"
 
         if [ "${{ inputs.mode }}" = "start" ]; then
           # Generate unique label for this run
@@ -182,7 +201,7 @@ runs:
           echo "🚀 Starting EC2 runner with label: $UNIQUE_LABEL"
           
           # Create EC2 instance and capture output
-          OUTPUT=$(./gh-workflow create \
+          OUTPUT=$($BINARY_PATH create \
             --github-token "${{ inputs.github-token }}" \
             --image-id "${{ inputs.image-id }}" \
             --instance-type "${{ inputs.instance-type }}" \
@@ -209,7 +228,7 @@ runs:
         elif [ "${{ inputs.mode }}" = "stop" ]; then
           echo "🛑 Stopping EC2 runner: ${{ inputs.instance-id }}"
           
-          ./gh-workflow terminate \
+          $BINARY_PATH terminate \
             --instance-id "${{ inputs.instance-id }}" \
             --output-format "github-actions" \
             --aws-region "${{ inputs.aws-region }}"
