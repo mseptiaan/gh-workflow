@@ -1,0 +1,43 @@
+# Build artifacts
+build/
+dist/
+*.exe
+gh-workflow
+
+# Go build artifacts
+*.o
+*.a
+*.so
+
+# Test artifacts
+*.test
+*.prof
+
+# Go modules
+go.work
+go.work.sum
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Coverage
+*.out
+coverage.html 

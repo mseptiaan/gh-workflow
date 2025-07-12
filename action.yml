@@ -59,26 +59,98 @@ outputs:
 runs:
   using: "composite"
   steps:
-    - name: Setup Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: "1.21"
-
     - name: Setup GitHub Runner EC2 Manager
       shell: bash
       run: |
-        # Download or build the github-runner binary
-        if [ ! -f "${{ github.action_path }}/github-runner" ]; then
-          echo "Building github-runner binary..."
-          cd "${{ github.action_path }}"
-          go build -o github-runner .
+        # Detect OS and architecture
+        OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+        ARCH=$(uname -m)
+
+        # Map architecture names to common release naming
+        case $ARCH in
+          x86_64)
+            ARCH="amd64"
+            ;;
+          aarch64|arm64)
+            ARCH="arm64"
+            ;;
+          i386|i686)
+            ARCH="386"
+            ;;
+          *)
+            echo "❌ Unsupported architecture: $ARCH"
+            exit 1
+            ;;
+        esac
+
+        # Map OS names to common release naming
+        case $OS in
+          linux)
+            OS="linux"
+            EXT=""
+            ;;
+          darwin)
+            OS="darwin"
+            EXT=""
+            ;;
+          mingw*|msys*|cygwin*)
+            OS="windows"
+            EXT=".exe"
+            ;;
+          *)
+            echo "❌ Unsupported OS: $OS"
+            exit 1
+            ;;
+        esac
+
+        BINARY_NAME="gh-workflow${EXT}"
+
+        # Check if binary already exists
+        if [ -f "${{ github.action_path }}/$BINARY_NAME" ]; then
+          echo "✅ Binary already exists: $BINARY_NAME"
+        else
+          echo "📥 Downloading gh-workflow binary for $OS-$ARCH..."
+          
+          # Get the latest release download URL
+          # Note: Update this URL to match your actual GitHub repository
+          REPO_URL="https://github.com/mseptiaan/gh-workflow"
+          RELEASE_URL="${REPO_URL}/releases/latest/download/gh-workflow-${OS}-${ARCH}${EXT}"
+          
+          # Download the binary
+          echo "🔗 Downloading from: $RELEASE_URL"
+          
+          if command -v curl &> /dev/null; then
+            curl -L -o "${{ github.action_path }}/$BINARY_NAME" "$RELEASE_URL"
+          elif command -v wget &> /dev/null; then
+            wget -O "${{ github.action_path }}/$BINARY_NAME" "$RELEASE_URL"
+          else
+            echo "❌ Neither curl nor wget is available"
+            exit 1
+          fi
+          
+          # Check if download was successful
+          if [ ! -f "${{ github.action_path }}/$BINARY_NAME" ]; then
+            echo "❌ Failed to download binary"
+            exit 1
+          fi
+          
+          echo "✅ Successfully downloaded: $BINARY_NAME"
         fi
 
         # Make it executable
-        chmod +x "${{ github.action_path }}/github-runner"
+        chmod +x "${{ github.action_path }}/$BINARY_NAME"
+
+        # Create a symlink or copy without extension for compatibility
+        if [ "$EXT" = ".exe" ]; then
+          cp "${{ github.action_path }}/$BINARY_NAME" "${{ github.action_path }}/gh-workflow"
+        else
+          ln -sf "$BINARY_NAME" "${{ github.action_path }}/gh-workflow"
+        fi
 
         # Add to PATH
         echo "${{ github.action_path }}" >> $GITHUB_PATH
+
+        echo "🎉 GitHub Runner EC2 Manager setup complete!"
 
     - name: Execute GitHub Runner Action
       id: execute-runner
@@ -106,7 +178,7 @@ runs:
           echo "🚀 Starting EC2 runner with label: $UNIQUE_LABEL"
           
           # Create EC2 instance and capture output
-          OUTPUT=$(./github-runner create \
+          OUTPUT=$(./gh-workflow create \
             --github-token "${{ inputs.github-token }}" \
             --image-id "${{ inputs.image-id }}" \
             --instance-type "${{ inputs.instance-type }}" \
@@ -133,7 +205,7 @@ runs:
         elif [ "${{ inputs.mode }}" = "stop" ]; then
           echo "🛑 Stopping EC2 runner: ${{ inputs.instance-id }}"
           
-          ./github-runner terminate \
+          ./gh-workflow terminate \
             --instance-id "${{ inputs.instance-id }}" \
             --output-format "github-actions" \
             --aws-region "${{ inputs.aws-region }}"
