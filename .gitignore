@@ -3,6 +3,7 @@ build/
 dist/
 *.exe
 gh-workflow
+gh-workflow-*
 
 # Go build artifacts
 *.o
