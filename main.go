@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -17,6 +18,33 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/spf13/cobra"
+)
+
+// Constants for configuration
+const (
+	// GitHub Actions runner version
+	GitHubRunnerVersion = "2.313.0"
+
+	// Default AWS region
+	DefaultAWSRegion = "us-east-1"
+
+	// Default runner labels
+	DefaultRunnerLabels = "self-hosted,linux,x64"
+
+	// GitHub API version
+	GitHubAPIVersion = "2022-11-28"
+
+	// HTTP client timeout
+	HTTPClientTimeout = 30 * time.Second
+
+	// EC2 instance wait timeout
+	EC2WaitTimeout = 5 * time.Minute
+
+	// Default pre-runner script
+	DefaultPreRunnerScript = `# Default pre-runner script
+echo "Starting GitHub Actions Runner setup..."
+apt-get update -y
+apt-get install -y curl jq git`
 )
 
 var (
@@ -34,6 +62,28 @@ var (
 	outputFormat    string
 )
 
+// Singleton HTTP client for reuse
+var (
+	httpClient *http.Client
+	httpOnce   sync.Once
+)
+
+// Singleton AWS EC2 client for reuse
+var (
+	ec2Client *ec2.Client
+	ec2Once   sync.Once
+)
+
+// getHTTPClient returns a singleton HTTP client
+func getHTTPClient() *http.Client {
+	httpOnce.Do(func() {
+		httpClient = &http.Client{
+			Timeout: HTTPClientTimeout,
+		}
+	})
+	return httpClient
+}
+
 // GitHubRegistrationTokenResponse represents the response from GitHub API
 type GitHubRegistrationTokenResponse struct {
 	Token     string    `json:"token"`
@@ -41,31 +91,28 @@ type GitHubRegistrationTokenResponse struct {
 }
 
 // getGitHubRegistrationToken fetches a runner registration token from GitHub API
-func getGitHubRegistrationToken(githubToken, repoOwner, repoName string) (string, error) {
+func getGitHubRegistrationToken(ctx context.Context, githubToken, repoOwner, repoName string) (string, error) {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/actions/runners/registration-token", repoOwner, repoName)
 
-	req, err := http.NewRequest("POST", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "POST", url, nil)
 	if err != nil {
-		return "", fmt.Errorf("failed to create request: %v", err)
+		return "", fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", githubToken))
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("X-GitHub-Api-Version", GitHubAPIVersion)
 
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
-
+	client := getHTTPClient()
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("failed to make request: %v", err)
+		return "", fmt.Errorf("failed to make request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("failed to read response body: %v", err)
+		return "", fmt.Errorf("failed to read response body: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusCreated {
@@ -74,7 +121,7 @@ func getGitHubRegistrationToken(githubToken, repoOwner, repoName string) (string
 
 	var tokenResponse GitHubRegistrationTokenResponse
 	if err := json.Unmarshal(body, &tokenResponse); err != nil {
-		return "", fmt.Errorf("failed to parse response: %v", err)
+		return "", fmt.Errorf("failed to parse response: %w", err)
 	}
 
 	if outputFormat != "github-actions" {
@@ -99,144 +146,199 @@ func loadAWSCredentials() (aws.CredentialsProvider, error) {
 	return credentials.NewStaticCredentialsProvider(accessKeyID, secretAccessKey, ""), nil
 }
 
-// createEC2Client creates an AWS EC2 client with credentials
-func createEC2Client() (*ec2.Client, error) {
-	creds, err := loadAWSCredentials()
-	if err != nil {
-		return nil, err
-	}
-
-	// Check for region from environment variables, default to us-east-1 if not set
+// getAWSRegion gets the AWS region from environment variables or returns default
+func getAWSRegion() string {
 	region := os.Getenv("AWS_REGION")
 	if region == "" {
 		region = os.Getenv("AWS_DEFAULT_REGION")
 	}
 	if region == "" {
-		region = "us-east-1" // Default region
+		region = DefaultAWSRegion
 	}
+	return region
+}
 
-	cfg, err := config.LoadDefaultConfig(context.TODO(),
-		config.WithRegion(region),
-		config.WithCredentialsProvider(creds),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load AWS config: %v", err)
-	}
+// createEC2Client creates a singleton AWS EC2 client with credentials
+func createEC2Client(ctx context.Context) (*ec2.Client, error) {
+	var err error
+	ec2Once.Do(func() {
+		creds, credErr := loadAWSCredentials()
+		if credErr != nil {
+			err = credErr
+			return
+		}
 
-	fmt.Println("AWS Region: ", region)
+		region := getAWSRegion()
 
-	return ec2.NewFromConfig(cfg), nil
+		cfg, cfgErr := config.LoadDefaultConfig(ctx,
+			config.WithRegion(region),
+			config.WithCredentialsProvider(creds),
+		)
+		if cfgErr != nil {
+			err = fmt.Errorf("failed to load AWS config: %w", cfgErr)
+			return
+		}
+
+		ec2Client = ec2.NewFromConfig(cfg)
+		fmt.Printf("AWS Region: %s\n", region)
+	})
+
+	return ec2Client, err
 }
 
 // generateUserData creates a comprehensive user data script for GitHub Actions runner
 func generateUserData(registrationToken, repoOwner, repoName, runnerLabels, preRunnerScript, runnerName string) string {
-	// Default pre-runner script if none provided
+	// Use default pre-runner script if none provided
 	if preRunnerScript == "" {
-		preRunnerScript = `# Default pre-runner script
-echo "Starting GitHub Actions Runner setup..."
-apt-get update -y
-apt-get install -y curl jq git`
+		preRunnerScript = DefaultPreRunnerScript
 	}
 
-	// Default labels if none provided
+	// Use default labels if none provided
 	if runnerLabels == "" {
-		runnerLabels = "self-hosted,linux,x64"
+		runnerLabels = DefaultRunnerLabels
 	}
 
-	// Default runner name if none provided
+	// Generate default runner name if none provided
 	if runnerName == "" {
 		runnerName = "$(hostname)-runner"
 	}
 
-	userDataLines := []string{
-		"#!/bin/bash",
-		"exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1",
-		"echo 'Starting GitHub Actions Runner setup...'",
-		"mkdir actions-runner && cd actions-runner",
-		fmt.Sprintf(`echo "%s" > pre-runner-script.sh`, strings.ReplaceAll(preRunnerScript, `"`, `\"`)),
-		"chmod +x pre-runner-script.sh",
-		"source pre-runner-script.sh",
-		"case $(uname -m) in aarch64) ARCH=\"arm64\" ;; amd64|x86_64) ARCH=\"x64\" ;; esac && export RUNNER_ARCH=${ARCH}",
-		"echo \"Detected architecture: ${RUNNER_ARCH}\"",
-		"curl -O -L https://github.com/actions/runner/releases/download/v2.313.0/actions-runner-linux-${RUNNER_ARCH}-2.313.0.tar.gz",
-		"tar xzf ./actions-runner-linux-${RUNNER_ARCH}-2.313.0.tar.gz",
-		"export RUNNER_ALLOW_RUNASROOT=1",
-		fmt.Sprintf(
-			`./config.sh --url https://github.com/%s/%s --token %s --labels %s --name "%s" --work _work --replace`,
-			repoOwner,
-			repoName,
-			registrationToken,
-			runnerLabels,
-			runnerName,
-		),
-		"echo 'Runner configured successfully'",
-		"./run.sh &",
-		"echo 'Runner started in background'",
-		"echo 'GitHub Actions Runner setup completed successfully!'",
+	// Build user data script efficiently
+	var userDataBuilder strings.Builder
+	userDataBuilder.WriteString("#!/bin/bash\n")
+	userDataBuilder.WriteString("exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1\n")
+	userDataBuilder.WriteString("echo 'Starting GitHub Actions Runner setup...'\n")
+	userDataBuilder.WriteString("mkdir actions-runner && cd actions-runner\n")
+	userDataBuilder.WriteString(fmt.Sprintf("echo \"%s\" > pre-runner-script.sh\n",
+		strings.ReplaceAll(preRunnerScript, `"`, `\"`)))
+	userDataBuilder.WriteString("chmod +x pre-runner-script.sh\n")
+	userDataBuilder.WriteString("source pre-runner-script.sh\n")
+	userDataBuilder.WriteString("case $(uname -m) in aarch64) ARCH=\"arm64\" ;; amd64|x86_64) ARCH=\"x64\" ;; esac && export RUNNER_ARCH=${ARCH}\n")
+	userDataBuilder.WriteString("echo \"Detected architecture: ${RUNNER_ARCH}\"\n")
+	userDataBuilder.WriteString(fmt.Sprintf("curl -O -L https://github.com/actions/runner/releases/download/v%s/actions-runner-linux-${RUNNER_ARCH}-%s.tar.gz\n",
+		GitHubRunnerVersion, GitHubRunnerVersion))
+	userDataBuilder.WriteString(fmt.Sprintf("tar xzf ./actions-runner-linux-${RUNNER_ARCH}-%s.tar.gz\n", GitHubRunnerVersion))
+	userDataBuilder.WriteString("export RUNNER_ALLOW_RUNASROOT=1\n")
+	userDataBuilder.WriteString(fmt.Sprintf("./config.sh --url https://github.com/%s/%s --token %s --labels %s --name \"%s\" --work _work --replace\n",
+		repoOwner, repoName, registrationToken, runnerLabels, runnerName))
+	userDataBuilder.WriteString("echo 'Runner configured successfully'\n")
+	userDataBuilder.WriteString("./run.sh &\n")
+	userDataBuilder.WriteString("echo 'Runner started in background'\n")
+	userDataBuilder.WriteString("echo 'GitHub Actions Runner setup completed successfully!'\n")
+
+	return userDataBuilder.String()
+}
+
+// createInstanceTags creates standardized EC2 instance tags
+func createInstanceTags(repoOwner, repoName, runnerLabels, runnerName string) []types.Tag {
+	return []types.Tag{
+		{
+			Key:   aws.String("Name"),
+			Value: aws.String(fmt.Sprintf("GitHub Actions Runner - %s/%s", repoOwner, repoName)),
+		},
+		{
+			Key:   aws.String("Purpose"),
+			Value: aws.String("GitHub Actions"),
+		},
+		{
+			Key:   aws.String("Repository"),
+			Value: aws.String(fmt.Sprintf("%s/%s", repoOwner, repoName)),
+		},
+		{
+			Key:   aws.String("Labels"),
+			Value: aws.String(runnerLabels),
+		},
+		{
+			Key:   aws.String("RunnerName"),
+			Value: aws.String(runnerName),
+		},
+	}
+}
+
+// waitForInstanceRunning waits for EC2 instance to be running
+func waitForInstanceRunning(ctx context.Context, svc *ec2.Client, instanceID string) error {
+	if outputFormat != "github-actions" {
+		fmt.Printf("⏳ Waiting for instance to be running...\n")
 	}
 
-	return strings.Join(userDataLines, "\n")
+	waiter := ec2.NewInstanceRunningWaiter(svc)
+	err := waiter.Wait(ctx, &ec2.DescribeInstancesInput{
+		InstanceIds: []string{instanceID},
+	}, EC2WaitTimeout)
+
+	if err != nil {
+		if outputFormat != "github-actions" {
+			fmt.Printf("⚠️  Instance created but failed to wait for running state: %v\n", err)
+		}
+		return err
+	}
+
+	if outputFormat != "github-actions" {
+		fmt.Printf("🎉 Instance is now running!\n")
+		fmt.Printf("📋 Check the user data log: ssh into the instance and run 'sudo tail -f /var/log/user-data.log'\n")
+	}
+
+	return nil
+}
+
+// printInstanceDetails prints instance creation details
+func printInstanceDetails(instanceID, instanceType, imageID, subnetID, securityGroupID, repoOwner, repoName, runnerLabels, runnerName string) {
+	if outputFormat == "github-actions" {
+		// GitHub Actions compatible output
+		fmt.Printf("Instance ID: %s\n", instanceID)
+		fmt.Printf("Runner Name: %s\n", runnerName)
+		fmt.Printf("Labels: %s\n", runnerLabels)
+	} else {
+		// Human-readable output
+		fmt.Printf("✅ EC2 instance created successfully!\n")
+		fmt.Printf("Instance ID: %s\n", instanceID)
+		fmt.Printf("Instance Type: %s\n", instanceType)
+		fmt.Printf("Image ID: %s\n", imageID)
+		fmt.Printf("Subnet ID: %s\n", subnetID)
+		fmt.Printf("Security Group ID: %s\n", securityGroupID)
+		fmt.Printf("Repository: %s/%s\n", repoOwner, repoName)
+		fmt.Printf("Runner Labels: %s\n", runnerLabels)
+		fmt.Printf("Runner Name: %s\n", runnerName)
+	}
 }
 
 // createEC2Instance creates an EC2 instance with the specified parameters
 func createEC2Instance(
+	ctx context.Context,
 	githubToken, imageID, instanceType, subnetID, securityGroupID, repoOwner, repoName, runnerLabels, preRunnerScript, runnerName string,
 ) error {
 	// First, get the GitHub runner registration token
 	if outputFormat != "github-actions" {
 		fmt.Printf("🔑 Fetching GitHub runner registration token...\n")
 	}
-	registrationToken, err := getGitHubRegistrationToken(githubToken, repoOwner, repoName)
+
+	registrationToken, err := getGitHubRegistrationToken(ctx, githubToken, repoOwner, repoName)
 	if err != nil {
-		return fmt.Errorf("failed to get GitHub registration token: %v", err)
+		return fmt.Errorf("failed to get GitHub registration token: %w", err)
 	}
 
-	svc, err := createEC2Client()
+	svc, err := createEC2Client(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create EC2 client: %w", err)
 	}
 
 	// Generate comprehensive user data script with registration token
 	userData := generateUserData(registrationToken, repoOwner, repoName, runnerLabels, preRunnerScript, runnerName)
-
-	// Base64 encode the user data
 	userDataEncoded := base64.StdEncoding.EncodeToString([]byte(userData))
 
+	// Create EC2 instance input
 	runInput := &ec2.RunInstancesInput{
-		ImageId:      aws.String(imageID),
-		MinCount:     aws.Int32(1),
-		MaxCount:     aws.Int32(1),
-		InstanceType: types.InstanceType(instanceType),
-		SubnetId:     aws.String(subnetID),
-		SecurityGroupIds: []string{
-			securityGroupID,
-		},
-		UserData: aws.String(userDataEncoded),
+		ImageId:          aws.String(imageID),
+		MinCount:         aws.Int32(1),
+		MaxCount:         aws.Int32(1),
+		InstanceType:     types.InstanceType(instanceType),
+		SubnetId:         aws.String(subnetID),
+		SecurityGroupIds: []string{securityGroupID},
+		UserData:         aws.String(userDataEncoded),
 		TagSpecifications: []types.TagSpecification{
 			{
 				ResourceType: types.ResourceTypeInstance,
-				Tags: []types.Tag{
-					{
-						Key:   aws.String("Name"),
-						Value: aws.String(fmt.Sprintf("GitHub Actions Runner - %s/%s", repoOwner, repoName)),
-					},
-					{
-						Key:   aws.String("Purpose"),
-						Value: aws.String("GitHub Actions"),
-					},
-					{
-						Key:   aws.String("Repository"),
-						Value: aws.String(fmt.Sprintf("%s/%s", repoOwner, repoName)),
-					},
-					{
-						Key:   aws.String("Labels"),
-						Value: aws.String(runnerLabels),
-					},
-					{
-						Key:   aws.String("RunnerName"),
-						Value: aws.String(runnerName),
-					},
-				},
+				Tags:         createInstanceTags(repoOwner, repoName, runnerLabels, runnerName),
 			},
 		},
 	}
@@ -244,60 +346,33 @@ func createEC2Instance(
 	if outputFormat != "github-actions" {
 		fmt.Printf("🚀 Launching EC2 instance...\n")
 	}
-	result, err := svc.RunInstances(context.TODO(), runInput)
+
+	result, err := svc.RunInstances(ctx, runInput)
 	if err != nil {
-		return fmt.Errorf("failed to create EC2 instance: %v", err)
+		return fmt.Errorf("failed to create EC2 instance: %w", err)
 	}
 
-	if len(result.Instances) > 0 {
-		instanceID := *result.Instances[0].InstanceId
-
-		if outputFormat == "github-actions" {
-			// GitHub Actions compatible output
-			fmt.Printf("Instance ID: %s\n", instanceID)
-			fmt.Printf("Runner Name: %s\n", runnerName)
-			fmt.Printf("Labels: %s\n", runnerLabels)
-		} else {
-			// Human-readable output
-			fmt.Printf("✅ EC2 instance created successfully!\n")
-			fmt.Printf("Instance ID: %s\n", instanceID)
-			fmt.Printf("Instance Type: %s\n", instanceType)
-			fmt.Printf("Image ID: %s\n", imageID)
-			fmt.Printf("Subnet ID: %s\n", subnetID)
-			fmt.Printf("Security Group ID: %s\n", securityGroupID)
-			fmt.Printf("Repository: %s/%s\n", repoOwner, repoName)
-			fmt.Printf("Runner Labels: %s\n", runnerLabels)
-			fmt.Printf("Runner Name: %s\n", runnerName)
-		}
-
-		// Wait for instance to be running
-		if outputFormat != "github-actions" {
-			fmt.Printf("⏳ Waiting for instance to be running...\n")
-		}
-		waiter := ec2.NewInstanceRunningWaiter(svc)
-		err = waiter.Wait(context.TODO(), &ec2.DescribeInstancesInput{
-			InstanceIds: []string{instanceID},
-		}, time.Minute*5)
-		if err != nil {
-			if outputFormat != "github-actions" {
-				fmt.Printf("⚠️  Instance created but failed to wait for running state: %v\n", err)
-			}
-		} else {
-			if outputFormat != "github-actions" {
-				fmt.Printf("🎉 Instance is now running!\n")
-				fmt.Printf("📋 Check the user data log: ssh into the instance and run 'sudo tail -f /var/log/user-data.log'\n")
-			}
-		}
+	if len(result.Instances) == 0 {
+		return fmt.Errorf("no instances were created")
 	}
+
+	instanceID := *result.Instances[0].InstanceId
+	printInstanceDetails(instanceID, instanceType, imageID, subnetID, securityGroupID, repoOwner, repoName, runnerLabels, runnerName)
+
+	// Wait for instance to be running (with timeout context)
+	waitCtx, cancel := context.WithTimeout(ctx, EC2WaitTimeout)
+	defer cancel()
+
+	waitForInstanceRunning(waitCtx, svc, instanceID)
 
 	return nil
 }
 
 // terminateEC2Instance terminates the specified EC2 instance
-func terminateEC2Instance(instanceID string) error {
-	svc, err := createEC2Client()
+func terminateEC2Instance(ctx context.Context, instanceID string) error {
+	svc, err := createEC2Client(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create EC2 client: %w", err)
 	}
 
 	// First, describe the instance to check if it exists
@@ -305,9 +380,9 @@ func terminateEC2Instance(instanceID string) error {
 		InstanceIds: []string{instanceID},
 	}
 
-	_, err = svc.DescribeInstances(context.TODO(), describeInput)
+	_, err = svc.DescribeInstances(ctx, describeInput)
 	if err != nil {
-		return fmt.Errorf("failed to find instance %s: %v", instanceID, err)
+		return fmt.Errorf("failed to find instance %s: %w", instanceID, err)
 	}
 
 	// Terminate the instance
@@ -315,25 +390,22 @@ func terminateEC2Instance(instanceID string) error {
 		InstanceIds: []string{instanceID},
 	}
 
-	result, err := svc.TerminateInstances(context.TODO(), terminateInput)
+	result, err := svc.TerminateInstances(ctx, terminateInput)
 	if err != nil {
-		return fmt.Errorf("failed to terminate instance %s: %v", instanceID, err)
+		return fmt.Errorf("failed to terminate instance %s: %w", instanceID, err)
 	}
 
-	if len(result.TerminatingInstances) > 0 {
-		currentState := string(result.TerminatingInstances[0].CurrentState.Name)
+	if len(result.TerminatingInstances) == 0 {
+		return fmt.Errorf("no instances were terminated")
+	}
 
-		if outputFormat == "github-actions" {
-			fmt.Printf("Termination Status: %s\n", currentState)
-		} else {
-			fmt.Printf("✅ Instance %s termination initiated!\n", instanceID)
-			fmt.Printf("Current State: %s\n", currentState)
-		}
+	currentState := string(result.TerminatingInstances[0].CurrentState.Name)
 
-		// If currentState is "shutting-down", return. Otherwise, wait until "shutting-down" or "terminated".
-		if currentState == "shutting-down" {
-			return nil
-		}
+	if outputFormat == "github-actions" {
+		fmt.Printf("Termination Status: %s\n", currentState)
+	} else {
+		fmt.Printf("✅ Instance %s termination initiated!\n", instanceID)
+		fmt.Printf("Current State: %s\n", currentState)
 	}
 
 	return nil
@@ -376,7 +448,10 @@ var createCmd = &cobra.Command{
 		if outputFormat != "github-actions" {
 			fmt.Printf("🚀 Creating EC2 instance for GitHub Actions runner...\n")
 		}
+
+		ctx := cmd.Context()
 		return createEC2Instance(
+			ctx,
 			githubToken,
 			imageID,
 			instanceType,
@@ -403,7 +478,9 @@ var terminateCmd = &cobra.Command{
 		if outputFormat != "github-actions" {
 			fmt.Printf("🛑 Terminating EC2 instance %s...\n", instanceID)
 		}
-		return terminateEC2Instance(instanceID)
+
+		ctx := cmd.Context()
+		return terminateEC2Instance(ctx, instanceID)
 	},
 }
 
@@ -417,7 +494,7 @@ func init() {
 	createCmd.Flags().StringVar(&securityGroupID, "security-group", "", "Security group ID")
 	createCmd.Flags().StringVar(&repoOwner, "repo-owner", "", "GitHub repository owner")
 	createCmd.Flags().StringVar(&repoName, "repo-name", "", "GitHub repository name")
-	createCmd.Flags().StringVar(&runnerLabels, "labels", "self-hosted,linux,x64", "Runner labels (comma-separated)")
+	createCmd.Flags().StringVar(&runnerLabels, "labels", DefaultRunnerLabels, "Runner labels (comma-separated)")
 	createCmd.Flags().
 		StringVar(&preRunnerScript, "pre-runner-script", "", "Pre-runner script to execute before runner setup")
 	createCmd.Flags().StringVar(&runnerName, "runner-name", "", "Name for the GitHub Actions runner")
