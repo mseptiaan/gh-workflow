@@ -6,6 +6,7 @@ A command-line tool and GitHub Action to create and terminate EC2 instances for 
 
 - ✅ Create EC2 instances configured for GitHub Actions runners
 - ✅ Terminate existing EC2 instances
+- ✅ **On-demand and Spot instance support**
 - ✅ Read AWS credentials from `~/.aws/credentials`
 - ✅ Wait for instance state changes (running/terminated)
 - ✅ Automatic tagging of instances
@@ -16,6 +17,23 @@ A command-line tool and GitHub Action to create and terminate EC2 instances for 
 - ✅ Proper GitHub runner configuration
 - ✅ Automatic GitHub registration token generation
 - ✅ **GitHub Action support with workflow outputs**
+
+## Spot vs On-Demand Instances
+
+This tool supports both **on-demand** and **spot** EC2 instances:
+
+### On-Demand Instances (Default)
+- **Predictable pricing**: Fixed price per hour
+- **Guaranteed availability**: Instance won't be interrupted
+- **Best for**: Production workloads, critical CI/CD pipelines
+
+### Spot Instances
+- **Cost savings**: Up to 70-90% cheaper than on-demand pricing
+- **Interruption risk**: AWS can terminate with 2-minute notice when capacity is needed
+- **Best for**: Development, testing, non-critical workloads, batch processing
+- **Automatic fallback**: If spot price exceeds your max price, instance won't start
+
+**Cost Example**: A `t3.micro` on-demand instance costs ~$0.0104/hour, while the same spot instance might cost ~$0.003/hour (71% savings).
 
 ## Usage Methods
 
@@ -72,6 +90,56 @@ jobs:
           instance-id: ${{ needs.start-runner.outputs.ec2-instance-id }}
 ```
 
+#### Spot Instance Usage
+
+```yaml
+name: 'Spot Instance Runner Example'
+
+on:
+  workflow_dispatch:
+
+jobs:
+  start-spot-runner:
+    runs-on: ubuntu-latest
+    outputs:
+      label: ${{ steps.start-spot-runner.outputs.label }}
+      ec2-instance-id: ${{ steps.start-spot-runner.outputs.ec2-instance-id }}
+    steps:
+      - name: Start Spot EC2 Runner
+        id: start-spot-runner
+        uses: mseptiaan/gh-workflow@v1.0.0
+        with:
+          mode: start
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          image-id: ami-0c55b159cbfafe1d0
+          instance-type: t3.micro
+          subnet-id: subnet-12345678
+          security-group: sg-12345678
+          instance-market-type: spot
+          spot-max-price: "0.01"  # Maximum $0.01/hour
+
+  run-tests-on-spot:
+    needs: start-spot-runner
+    runs-on: ${{ fromJSON(needs.start-spot-runner.outputs.label) }}
+    steps:
+      - name: Test on Spot Runner
+        run: |
+          echo "Running on cost-effective spot instance!"
+          echo "Instance ID: ${{ needs.start-spot-runner.outputs.ec2-instance-id }}"
+
+  stop-spot-runner:
+    needs: [start-spot-runner, run-tests-on-spot]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Stop Spot EC2 Runner
+        uses: mseptiaan/gh-workflow@v1.0.0
+        with:
+          mode: stop
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          instance-id: ${{ needs.start-spot-runner.outputs.ec2-instance-id }}
+```
+
 #### Action Inputs
 
 | Input | Required | Default | Description |
@@ -86,6 +154,8 @@ jobs:
 | `repo-name` | ❌ | Auto-detected | GitHub repository name |
 | `labels` | ❌ | `self-hosted,linux,x64` | Runner labels (comma-separated) |
 | `pre-runner-script` | ❌ | - | Pre-runner script to execute |
+| `instance-market-type` | ❌ | `on-demand` | Instance market type (`on-demand` or `spot`) |
+| `spot-max-price` | ❌ | - | Maximum price for spot instances (per hour in USD) |
 | `instance-id` | ❌ | - | EC2 instance ID (for stop mode) |
 | `aws-region` | ❌ | `us-east-1` | AWS region |
 
@@ -287,6 +357,33 @@ Release script options:
   --pre-runner-script "apt-get update -y && apt-get install -y docker.io"
 ```
 
+#### Create a Spot Instance
+
+```bash
+# Create a spot instance without max price (uses current spot price)
+./gh-workflow create \
+  --github-token YOUR_GITHUB_PERSONAL_ACCESS_TOKEN \
+  --image-id ami-0c55b159cbfafe1d0 \
+  --instance-type t3.nano \
+  --subnet-id subnet-12345678 \
+  --security-group sg-12345678 \
+  --repo-owner myorg \
+  --repo-name myrepo \
+  --instance-market-type spot
+
+# Create a spot instance with maximum price limit
+./gh-workflow create \
+  --github-token YOUR_GITHUB_PERSONAL_ACCESS_TOKEN \
+  --image-id ami-0c55b159cbfafe1d0 \
+  --instance-type t3.nano \
+  --subnet-id subnet-12345678 \
+  --security-group sg-12345678 \
+  --repo-owner myorg \
+  --repo-name myrepo \
+  --instance-market-type spot \
+  --spot-max-price "0.01"
+```
+
 ### Terminate an EC2 Instance
 
 ```bash
@@ -319,6 +416,8 @@ Release script options:
 | `--repo-name` | ✅ | - | GitHub repository name |
 | `--labels` | ❌ | `self-hosted,linux,x64` | Runner labels (comma-separated) |
 | `--pre-runner-script` | ❌ | Default system update | Pre-runner script to execute |
+| `--instance-market-type` | ❌ | `on-demand` | Instance market type (`on-demand` or `spot`) |
+| `--spot-max-price` | ❌ | - | Maximum price for spot instances (per hour in USD) |
 | `--runner-name` | ❌ | Auto-generated | Name for the GitHub Actions runner |
 | `--output-format` | ❌ | - | Output format (`github-actions` for GitHub Actions compatibility) |
 | `--aws-region` | ❌ | `us-east-1` | AWS region |

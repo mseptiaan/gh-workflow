@@ -20,18 +20,20 @@ import (
 )
 
 var (
-	githubToken     string
-	imageID         string
-	instanceType    string
-	subnetID        string
-	securityGroupID string
-	instanceID      string
-	repoOwner       string
-	repoName        string
-	runnerLabels    string
-	preRunnerScript string
-	runnerName      string
-	outputFormat    string
+	githubToken        string
+	imageID            string
+	instanceType       string
+	subnetID           string
+	securityGroupID    string
+	instanceID         string
+	repoOwner          string
+	repoName           string
+	runnerLabels       string
+	preRunnerScript    string
+	runnerName         string
+	outputFormat       string
+	instanceMarketType string
+	spotMaxPrice       string
 )
 
 // GitHubRegistrationTokenResponse represents the response from GitHub API
@@ -180,7 +182,7 @@ apt-get install -y curl jq git`
 
 // createEC2Instance creates an EC2 instance with the specified parameters
 func createEC2Instance(
-	githubToken, imageID, instanceType, subnetID, securityGroupID, repoOwner, repoName, runnerLabels, preRunnerScript, runnerName string,
+	githubToken, imageID, instanceType, subnetID, securityGroupID, repoOwner, repoName, runnerLabels, preRunnerScript, runnerName, instanceMarketType, spotMaxPrice string,
 ) error {
 	// First, get the GitHub runner registration token
 	if outputFormat != "github-actions" {
@@ -202,6 +204,35 @@ func createEC2Instance(
 	// Base64 encode the user data
 	userDataEncoded := base64.StdEncoding.EncodeToString([]byte(userData))
 
+	// Configure spot instance parameters if spot type is requested
+	var instanceMarketOptions *types.InstanceMarketOptionsRequest
+	if instanceMarketType == "spot" {
+		if outputFormat != "github-actions" {
+			fmt.Printf("🎯 Configuring spot instance...\n")
+		}
+
+		spotOptions := &types.SpotMarketOptions{
+			SpotInstanceType: types.SpotInstanceTypeOneTime,
+		}
+
+		// Set max price if specified
+		if spotMaxPrice != "" {
+			spotOptions.MaxPrice = aws.String(spotMaxPrice)
+			if outputFormat != "github-actions" {
+				fmt.Printf("💰 Setting spot max price: $%s/hour\n", spotMaxPrice)
+			}
+		}
+
+		instanceMarketOptions = &types.InstanceMarketOptionsRequest{
+			MarketType:  types.MarketTypeSpot,
+			SpotOptions: spotOptions,
+		}
+	} else {
+		if outputFormat != "github-actions" && instanceMarketType == "on-demand" {
+			fmt.Printf("🔒 Configuring on-demand instance...\n")
+		}
+	}
+
 	runInput := &ec2.RunInstancesInput{
 		ImageId:      aws.String(imageID),
 		MinCount:     aws.Int32(1),
@@ -212,33 +243,54 @@ func createEC2Instance(
 			securityGroupID,
 		},
 		UserData: aws.String(userDataEncoded),
-		TagSpecifications: []types.TagSpecification{
-			{
-				ResourceType: types.ResourceTypeInstance,
-				Tags: []types.Tag{
-					{
-						Key:   aws.String("Name"),
-						Value: aws.String(fmt.Sprintf("GitHub Actions Runner - %s/%s", repoOwner, repoName)),
-					},
-					{
-						Key:   aws.String("Purpose"),
-						Value: aws.String("GitHub Actions"),
-					},
-					{
-						Key:   aws.String("Repository"),
-						Value: aws.String(fmt.Sprintf("%s/%s", repoOwner, repoName)),
-					},
-					{
-						Key:   aws.String("Labels"),
-						Value: aws.String(runnerLabels),
-					},
-					{
-						Key:   aws.String("RunnerName"),
-						Value: aws.String(runnerName),
-					},
-				},
-			},
+	}
+
+	// Build tags dynamically
+	tags := []types.Tag{
+		{
+			Key:   aws.String("Name"),
+			Value: aws.String(fmt.Sprintf("GitHub Actions Runner - %s/%s", repoOwner, repoName)),
 		},
+		{
+			Key:   aws.String("Purpose"),
+			Value: aws.String("GitHub Actions"),
+		},
+		{
+			Key:   aws.String("Repository"),
+			Value: aws.String(fmt.Sprintf("%s/%s", repoOwner, repoName)),
+		},
+		{
+			Key:   aws.String("Labels"),
+			Value: aws.String(runnerLabels),
+		},
+		{
+			Key:   aws.String("RunnerName"),
+			Value: aws.String(runnerName),
+		},
+		{
+			Key:   aws.String("InstanceMarketType"),
+			Value: aws.String(instanceMarketType),
+		},
+	}
+
+	// Add spot price tag if specified
+	if instanceMarketType == "spot" && spotMaxPrice != "" {
+		tags = append(tags, types.Tag{
+			Key:   aws.String("SpotMaxPrice"),
+			Value: aws.String(spotMaxPrice),
+		})
+	}
+
+	runInput.TagSpecifications = []types.TagSpecification{
+		{
+			ResourceType: types.ResourceTypeInstance,
+			Tags:         tags,
+		},
+	}
+
+	// Add spot instance configuration if specified
+	if instanceMarketOptions != nil {
+		runInput.InstanceMarketOptions = instanceMarketOptions
 	}
 
 	if outputFormat != "github-actions" {
@@ -257,11 +309,19 @@ func createEC2Instance(
 			fmt.Printf("Instance ID: %s\n", instanceID)
 			fmt.Printf("Runner Name: %s\n", runnerName)
 			fmt.Printf("Labels: %s\n", runnerLabels)
+			fmt.Printf("Instance Market Type: %s\n", instanceMarketType)
+			if instanceMarketType == "spot" && spotMaxPrice != "" {
+				fmt.Printf("Spot Max Price: %s\n", spotMaxPrice)
+			}
 		} else {
 			// Human-readable output
 			fmt.Printf("✅ EC2 instance created successfully!\n")
 			fmt.Printf("Instance ID: %s\n", instanceID)
 			fmt.Printf("Instance Type: %s\n", instanceType)
+			fmt.Printf("Instance Market Type: %s\n", instanceMarketType)
+			if instanceMarketType == "spot" && spotMaxPrice != "" {
+				fmt.Printf("Spot Max Price: $%s/hour\n", spotMaxPrice)
+			}
 			fmt.Printf("Image ID: %s\n", imageID)
 			fmt.Printf("Subnet ID: %s\n", subnetID)
 			fmt.Printf("Security Group ID: %s\n", securityGroupID)
@@ -373,6 +433,11 @@ var createCmd = &cobra.Command{
 			return fmt.Errorf("repo-name is required")
 		}
 
+		// Validate instance market type
+		if instanceMarketType != "on-demand" && instanceMarketType != "spot" {
+			return fmt.Errorf("instance-market-type must be 'on-demand' or 'spot'")
+		}
+
 		if outputFormat != "github-actions" {
 			fmt.Printf("🚀 Creating EC2 instance for GitHub Actions runner...\n")
 		}
@@ -387,6 +452,8 @@ var createCmd = &cobra.Command{
 			runnerLabels,
 			preRunnerScript,
 			runnerName,
+			instanceMarketType,
+			spotMaxPrice,
 		)
 	},
 }
@@ -423,6 +490,8 @@ func init() {
 	createCmd.Flags().StringVar(&runnerName, "runner-name", "", "Name for the GitHub Actions runner")
 	createCmd.Flags().
 		StringVar(&outputFormat, "output-format", "", "Output format (github-actions for GitHub Actions compatibility)")
+	createCmd.Flags().StringVar(&instanceMarketType, "instance-market-type", "on-demand", "Instance market type (on-demand or spot)")
+	createCmd.Flags().StringVar(&spotMaxPrice, "spot-max-price", "", "Maximum price for spot instances (per hour in USD, optional)")
 
 	// Terminate command flags
 	terminateCmd.Flags().StringVar(&instanceID, "instance-id", "", "EC2 instance ID to terminate")
