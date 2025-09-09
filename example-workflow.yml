@@ -1,0 +1,159 @@
+name: "Example: Self-hosted Runner Management"
+
+# Basic example workflow showing both on-demand and spot instance runners
+# For comprehensive spot instance strategies, see: example-workflow-spot.yml
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Action to perform"
+        required: true
+        type: choice
+        options:
+          - start
+          - start-spot
+          - stop
+      instance-id:
+        description: "Instance ID (for stop action)"
+        required: false
+        type: string
+
+jobs:
+  start-runner:
+    if: github.event.inputs.action == 'start'
+    runs-on: ubuntu-latest
+    outputs:
+      label: ${{ steps.start-ec2-runner.outputs.label }}
+      ec2-instance-id: ${{ steps.start-ec2-runner.outputs.ec2-instance-id }}
+      runner-name: ${{ steps.start-ec2-runner.outputs.runner-name }}
+    steps:
+      - name: Start EC2 Runner
+        id: start-ec2-runner
+        uses: mseptiaan/gh-workflow@v1.0.0
+        with:
+          mode: start
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          image-id: ami-0c55b159cbfafe1d0 # Replace with your AMI ID
+          instance-type: t3.micro
+          subnet-id: subnet-12345678 # Replace with your subnet ID
+          security-group: sg-12345678 # Replace with your security group ID
+          labels: self-hosted,linux,x64,my-custom-label
+          pre-runner-script: |
+            apt-get update -y
+            apt-get install -y docker.io
+            systemctl start docker
+          aws-region: us-east-1
+
+  # Spot Instance Example (Cost-effective but may be interrupted)
+  start-spot-runner:
+    if: github.event.inputs.action == 'start-spot'
+    runs-on: ubuntu-latest
+    outputs:
+      label: ${{ steps.start-spot.outputs.label }}
+      ec2-instance-id: ${{ steps.start-spot.outputs.ec2-instance-id }}
+      runner-name: ${{ steps.start-spot.outputs.runner-name }}
+    steps:
+      - name: Start Spot Instance Runner
+        id: start-spot
+        uses: mseptiaan/gh-workflow@v1.0.0
+        with:
+          mode: start
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          image-id: ami-0c55b159cbfafe1d0 # Ubuntu 20.04 LTS
+          instance-type: t3.micro
+          subnet-id: ${{ secrets.SUBNET_ID }}
+          security-group: ${{ secrets.SECURITY_GROUP_ID }}
+          instance-market-type: spot
+          spot-max-price: "0.02" # Max $0.02/hour for cost control
+          labels: self-hosted,linux,x64,spot-instance
+          runner-name: spot-runner-${{ github.run_id }}
+          pre-runner-script: |
+            apt-get update -y
+            apt-get install -y curl wget
+            echo "⚡ Running on cost-effective spot instance!"
+            echo "💰 Up to 70% cost savings compared to on-demand"
+            echo "⚠️  May be interrupted by AWS (2-minute warning)"
+          aws-region: us-east-1
+
+  stop-runner:
+    if: github.event.inputs.action == 'stop'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Stop EC2 Runner
+        uses: mseptiaan/gh-workflow@v1.0.0
+        with:
+          mode: stop
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          instance-id: ${{ github.event.inputs.instance-id }}
+          aws-region: us-east-1
+          # Note: If using CLI directly, you can add timeout configuration:
+          # --timeout 600        # 10 minute timeout
+          # --force              # Force termination for stubborn instances
+
+  # Example job that runs on the self-hosted runner
+  test-on-self-hosted:
+    needs: start-runner
+    if: github.event.inputs.action == 'start'
+    runs-on: ${{ fromJSON(needs.start-runner.outputs.label) }}
+    steps:
+      - name: Test on Self-hosted Runner
+        run: |
+          echo "Running on self-hosted runner!"
+          echo "Runner name: ${{ needs.start-runner.outputs.runner-name }}"
+          echo "Instance ID: ${{ needs.start-runner.outputs.ec2-instance-id }}"
+
+  # Test job for spot instance
+  test-on-spot-runner:
+    needs: start-spot-runner
+    if: github.event.inputs.action == 'start-spot'
+    runs-on: ${{ fromJSON(needs.start-spot-runner.outputs.label) }}
+    steps:
+      - name: Test on Spot Instance Runner
+        run: |
+          echo "⚡ Running on spot instance!"
+          echo "Runner name: ${{ needs.start-spot-runner.outputs.runner-name }}"
+          echo "Instance ID: ${{ needs.start-spot-runner.outputs.ec2-instance-id }}"
+          echo "💰 Cost-effective spot pricing!"
+          echo "⚠️  Remember: spot instances can be interrupted"
+
+      - name: Quick Spot Test
+        run: |
+          echo "Testing spot instance capabilities..."
+          echo "Current time: $(date)"
+          echo "Available disk space:"
+          df -h /
+
+  # Clean up runner after job completes
+  cleanup-runner:
+    needs: [start-runner, test-on-self-hosted]
+    if: always() && github.event.inputs.action == 'start'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Stop EC2 Runner
+        uses: mseptiaan/gh-workflow@v1.0.0
+        with:
+          mode: stop
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          instance-id: ${{ needs.start-runner.outputs.ec2-instance-id }}
+          aws-region: us-east-1
+          # Note: If using CLI directly, you can add timeout configuration:
+          # --timeout 600        # 10 minute timeout
+          # --force              # Force termination for stubborn instances
+
+  # Clean up spot runner after job completes
+  cleanup-spot-runner:
+    needs: [start-spot-runner, test-on-spot-runner]
+    if: always() && github.event.inputs.action == 'start-spot'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Stop Spot EC2 Runner
+        uses: mseptiaan/gh-workflow@v1.0.0
+        with:
+          mode: stop
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          instance-id: ${{ needs.start-spot-runner.outputs.ec2-instance-id }}
+          aws-region: us-east-1
+          # Note: If using CLI directly, you can add timeout configuration:
+          # --timeout 600        # 10 minute timeout
+          # --force              # Force termination for stubborn instances

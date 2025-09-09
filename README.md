@@ -7,6 +7,8 @@ A command-line tool and GitHub Action to create and terminate EC2 instances for 
 - ✅ Create EC2 instances configured for GitHub Actions runners
 - ✅ Terminate existing EC2 instances
 - ✅ **On-demand and Spot instance support**
+- ✅ **Configurable termination timeouts** (60-3600 seconds)
+- ✅ **Force termination** for stubborn instances
 - ✅ Read AWS credentials from `~/.aws/credentials`
 - ✅ Wait for instance state changes (running/terminated)
 - ✅ Automatic tagging of instances
@@ -239,6 +241,34 @@ jobs:
           aws-region: us-west-2
 ```
 
+## Spot Instance Workflows
+
+For comprehensive spot instance examples with different cost strategies, see:
+
+- **`example-workflow-spot.yml`**: Advanced spot instance workflow with multiple strategies
+  - **Basic Spot**: Lowest cost, may be interrupted frequently
+  - **Premium Spot**: Higher cost but more stable with Docker support
+  - **Budget Spot**: Maximum cost savings with older instance types
+  - **Spot Termination**: Proper cleanup handling for spot instances
+
+- **`example-workflow.yml`**: Simple spot instance example included in main workflow
+
+### Spot Instance Strategies
+
+| Strategy | Instance Type | Max Price | Use Case | Interruption Risk |
+|----------|---------------|-----------|----------|-------------------|
+| **Basic** | `t3.micro` | Auto | Development, testing | High |
+| **Premium** | `c5.large` | $0.10/hr | Production builds | Medium |
+| **Budget** | `t2.micro` | $0.015/hr | Quick tasks | Very High |
+
+### Spot Instance Best Practices
+
+1. **Set Max Price**: Always set `spot-max-price` to control costs
+2. **Handle Interruptions**: Design workflows to handle 2-minute warnings
+3. **Use Appropriate Instances**: Match instance type to workload needs
+4. **Monitor Costs**: Track actual spot instance costs vs on-demand
+5. **Fallback Strategy**: Have on-demand fallback for critical workflows
+
 ### 2. Command Line Interface
 
 You can also use the tool directly from the command line.
@@ -387,7 +417,77 @@ Release script options:
 ### Terminate an EC2 Instance
 
 ```bash
+# Terminate with default timeout (300 seconds)
 ./gh-workflow terminate --instance-id i-1234567890abcdef0
+
+# Terminate with custom timeout (10 minutes)
+./gh-workflow terminate --instance-id i-1234567890abcdef0 --timeout 600
+
+# Force terminate with custom timeout (for stubborn instances)
+./gh-workflow terminate --instance-id i-1234567890abcdef0 --timeout 800 --force
+
+# Quick termination with short timeout
+./gh-workflow terminate --instance-id i-1234567890abcdef0 --timeout 120
+```
+
+### Termination Timeout Configuration
+
+The terminate command supports configurable timeouts to control how long to wait for EC2 instances to fully terminate:
+
+- **Default timeout**: 300 seconds (5 minutes)
+- **Minimum timeout**: 60 seconds
+- **Maximum timeout**: 3600 seconds (1 hour)
+- **Force termination**: Uses half the specified timeout (minimum 2 minutes)
+
+**Examples:**
+```bash
+# Fast termination for development (2 minutes)
+./gh-workflow terminate --instance-id i-123 --timeout 120
+
+# Standard termination (5 minutes)
+./gh-workflow terminate --instance-id i-123 --timeout 300
+
+# Extended timeout for large instances (15 minutes)
+./gh-workflow terminate --instance-id i-123 --timeout 900
+
+# Force termination with custom timeout
+./gh-workflow terminate --instance-id i-123 --timeout 600 --force
+```
+
+**Force Termination:**
+Use the `--force` flag when instances are stuck in termination:
+```bash
+# Force terminate stubborn instances
+./gh-workflow terminate --instance-id i-123 --force
+
+# Force terminate with extended timeout
+./gh-workflow terminate --instance-id i-123 --timeout 900 --force
+```
+
+**Timeout Behavior:**
+- **Graceful termination**: Uses the full specified timeout
+- **Force termination**: Uses half the specified timeout (minimum 2 minutes)
+- **Validation**: Timeouts must be between 60-3600 seconds
+- **Progress updates**: Shows instance state every 10 seconds during waiting
+
+### Troubleshooting Termination Issues
+
+**Problem: Instance stuck in "shutting-down" state**
+```bash
+# Try force termination with extended timeout
+./gh-workflow terminate --instance-id i-123 --timeout 900 --force
+```
+
+**Problem: Instance taking too long to terminate**
+```bash
+# Use shorter timeout for faster feedback
+./gh-workflow terminate --instance-id i-123 --timeout 120
+```
+
+**Problem: Spot instance not terminating properly**
+```bash
+# Force termination works well for spot instances
+./gh-workflow terminate --instance-id i-123 --force --timeout 600
 ```
 
 ### Help
@@ -428,6 +528,8 @@ Release script options:
 |------|----------|---------|-------------|
 | `--instance-id` | ✅ | - | EC2 instance ID to terminate |
 | `--output-format` | ❌ | - | Output format (`github-actions` for GitHub Actions compatibility) |
+| `--timeout` | ❌ | `300` | Maximum time in seconds to wait for termination (60-3600) |
+| `--force` | ❌ | `false` | Force termination even if graceful shutdown fails |
 
 ## User Data Script Features
 

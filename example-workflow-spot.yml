@@ -1,0 +1,235 @@
+name: "Example: Cost-Effective Spot Instance Runners"
+
+# Comprehensive spot instance workflow demonstrating different cost strategies:
+# - Basic Spot: Lowest cost, highest interruption risk (t3.micro)
+# - Premium Spot: Higher cost, lower interruption risk (c5.large + Docker)
+# - Budget Spot: Maximum savings, very high interruption risk (t2.micro)
+#
+# Each strategy includes proper cleanup and interruption handling.
+# Use this as a reference for implementing spot instances in your workflows.
+
+on:
+  workflow_dispatch:
+    inputs:
+      spot-strategy:
+        description: "Spot instance strategy"
+        required: true
+        type: choice
+        options:
+          - basic-spot
+          - premium-spot
+          - budget-spot
+          - stop-spot
+      instance-id:
+        description: "Instance ID (for stop action)"
+        required: false
+        type: string
+
+jobs:
+  # Basic Spot Instance (Lowest cost, may be interrupted)
+  start-basic-spot:
+    if: github.event.inputs.spot-strategy == 'basic-spot'
+    runs-on: ubuntu-latest
+    outputs:
+      label: ${{ steps.start-spot.outputs.label }}
+      ec2-instance-id: ${{ steps.start-spot.outputs.ec2-instance-id }}
+      instance-type: ${{ steps.start-spot.outputs.instance-type }}
+    steps:
+      - name: Start Basic Spot Instance Runner
+        id: start-spot
+        uses: mseptiaan/gh-workflow@v1.0.0
+        with:
+          mode: start
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          image-id: ami-0c55b159cbfafe1d0 # Ubuntu 20.04 LTS
+          instance-type: t3.micro
+          subnet-id: ${{ secrets.SUBNET_ID }}
+          security-group: ${{ secrets.SECURITY_GROUP_ID }}
+          instance-market-type: spot
+          labels: spot-runner,linux,x64,basic-spot
+          runner-name: spot-basic-${{ github.run_id }}
+          pre-runner-script: |
+            apt-get update -y
+            apt-get install -y curl wget unzip
+            echo "Running on cost-effective spot instance!"
+          aws-region: us-east-1
+
+  # Premium Spot Instance (Higher cost, less likely to be interrupted)
+  start-premium-spot:
+    if: github.event.inputs.spot-strategy == 'premium-spot'
+    runs-on: ubuntu-latest
+    outputs:
+      label: ${{ steps.start-spot.outputs.label }}
+      ec2-instance-id: ${{ steps.start-spot.outputs.ec2-instance-id }}
+      instance-type: ${{ steps.start-spot.outputs.instance-type }}
+    steps:
+      - name: Start Premium Spot Instance Runner
+        id: start-spot
+        uses: mseptiaan/gh-workflow@v1.0.0
+        with:
+          mode: start
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          image-id: ami-0c55b159cbfafe1d0
+          instance-type: c5.large
+          subnet-id: ${{ secrets.SUBNET_ID }}
+          security-group: ${{ secrets.SECURITY_GROUP_ID }}
+          instance-market-type: spot
+          spot-max-price: "0.10" # Max $0.10/hour
+          labels: spot-runner,linux,x64,premium-spot,high-mem
+          runner-name: spot-premium-${{ github.run_id }}
+          pre-runner-script: |
+            apt-get update -y
+            apt-get install -y docker.io build-essential
+            systemctl start docker
+            usermod -aG docker ubuntu
+            echo "Premium spot instance with Docker support!"
+          aws-region: us-east-1
+
+  # Budget Spot Instance (Very low cost, may use older instance types)
+  start-budget-spot:
+    if: github.event.inputs.spot-strategy == 'budget-spot'
+    runs-on: ubuntu-latest
+    outputs:
+      label: ${{ steps.start-spot.outputs.label }}
+      ec2-instance-id: ${{ steps.start-spot.outputs.ec2-instance-id }}
+      instance-type: ${{ steps.start-spot.outputs.instance-type }}
+    steps:
+      - name: Start Budget Spot Instance Runner
+        id: start-spot
+        uses: mseptiaan/gh-workflow@v1.0.0
+        with:
+          mode: start
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          image-id: ami-0c55b159cbfafe1d0
+          instance-type: t2.micro
+          subnet-id: ${{ secrets.SUBNET_ID }}
+          security-group: ${{ secrets.SECURITY_GROUP_ID }}
+          instance-market-type: spot
+          spot-max-price: "0.015" # Very low max price
+          labels: spot-runner,linux,x64,budget-spot
+          runner-name: spot-budget-${{ github.run_id }}
+          pre-runner-script: |
+            apt-get update -y
+            apt-get install -y curl git
+            echo "Ultra-budget spot instance - may be interrupted frequently!"
+          aws-region: us-east-1
+
+  # Stop any spot instance
+  stop-spot-runner:
+    if: github.event.inputs.spot-strategy == 'stop-spot'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Stop Spot Instance Runner
+        uses: mseptiaan/gh-workflow@v1.0.0
+        with:
+          mode: stop
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          instance-id: ${{ github.event.inputs.instance-id }}
+          aws-region: us-east-1
+
+  # Example workload on basic spot instance
+  test-basic-spot:
+    needs: start-basic-spot
+    if: github.event.inputs.spot-strategy == 'basic-spot'
+    runs-on: ${{ fromJSON(needs.start-basic-spot.outputs.label) }}
+    steps:
+      - name: Test on Basic Spot Instance
+        run: |
+          echo "🎯 Running on basic spot instance!"
+          echo "Instance Type: ${{ needs.start-basic-spot.outputs.instance-type }}"
+          echo "Instance ID: ${{ needs.start-basic-spot.outputs.ec2-instance-id }}"
+          echo "💰 This is the most cost-effective option!"
+          echo "⚠️  May be interrupted by AWS at any time"
+
+      - name: Simple Test
+        run: |
+          echo "Testing basic functionality..."
+          date
+          whoami
+          df -h
+
+  # Example workload on premium spot instance
+  test-premium-spot:
+    needs: start-premium-spot
+    if: github.event.inputs.spot-strategy == 'premium-spot'
+    runs-on: ${{ fromJSON(needs.start-premium-spot.outputs.label) }}
+    steps:
+      - name: Test on Premium Spot Instance
+        run: |
+          echo "💎 Running on premium spot instance!"
+          echo "Instance Type: ${{ needs.start-premium-spot.outputs.instance-type }}"
+          echo "Instance ID: ${{ needs.start-premium-spot.outputs.ec2-instance-id }}"
+          echo "💰 Higher cost but more stable!"
+          echo "⚠️  Less likely to be interrupted"
+
+      - name: Docker Test
+        run: |
+          echo "Testing Docker functionality..."
+          docker --version
+          docker run hello-world
+
+      - name: Build Test
+        run: |
+          echo "Testing build capabilities..."
+          gcc --version
+          make --version
+
+  # Example workload on budget spot instance
+  test-budget-spot:
+    needs: start-budget-spot
+    if: github.event.inputs.spot-strategy == 'budget-spot'
+    runs-on: ${{ fromJSON(needs.start-budget-spot.outputs.label) }}
+    steps:
+      - name: Test on Budget Spot Instance
+        run: |
+          echo "💸 Running on ultra-budget spot instance!"
+          echo "Instance Type: ${{ needs.start-budget-spot.outputs.instance-type }}"
+          echo "Instance ID: ${{ needs.start-budget-spot.outputs.ec2-instance-id }}"
+          echo "💰 Maximum cost savings!"
+          echo "⚠️  High interruption risk - use for quick tasks only"
+
+      - name: Quick Test
+        run: |
+          echo "Running quick test before potential interruption..."
+          echo "Current time: $(date)"
+          echo "Uptime: $(uptime)"
+
+  # Cleanup jobs for spot instances
+  cleanup-basic-spot:
+    needs: [start-basic-spot, test-basic-spot]
+    if: always() && github.event.inputs.spot-strategy == 'basic-spot'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cleanup Basic Spot Instance
+        uses: mseptiaan/gh-workflow@v1.0.0
+        with:
+          mode: stop
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          instance-id: ${{ needs.start-basic-spot.outputs.ec2-instance-id }}
+          aws-region: us-east-1
+
+  cleanup-premium-spot:
+    needs: [start-premium-spot, test-premium-spot]
+    if: always() && github.event.inputs.spot-strategy == 'premium-spot'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cleanup Premium Spot Instance
+        uses: mseptiaan/gh-workflow@v1.0.0
+        with:
+          mode: stop
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          instance-id: ${{ needs.start-premium-spot.outputs.ec2-instance-id }}
+          aws-region: us-east-1
+
+  cleanup-budget-spot:
+    needs: [start-budget-spot, test-budget-spot]
+    if: always() && github.event.inputs.spot-strategy == 'budget-spot'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cleanup Budget Spot Instance
+        uses: mseptiaan/gh-workflow@v1.0.0
+        with:
+          mode: stop
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          instance-id: ${{ needs.start-budget-spot.outputs.ec2-instance-id }}
+          aws-region: us-east-1

@@ -34,6 +34,8 @@ var (
 	outputFormat       string
 	instanceMarketType string
 	spotMaxPrice       string
+	forceTerminate     bool
+	terminationTimeout int
 )
 
 // GitHubRegistrationTokenResponse represents the response from GitHub API
@@ -154,7 +156,7 @@ apt-get install -y curl jq git`
 		"#!/bin/bash",
 		"exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1",
 		"echo 'Starting GitHub Actions Runner setup...'",
-		"mkdir actions-runner && cd actions-runner",
+		"mkdir -p actions-runner && cd actions-runner",
 		fmt.Sprintf(`echo "%s" > pre-runner-script.sh`, strings.ReplaceAll(preRunnerScript, `"`, `\"`)),
 		"chmod +x pre-runner-script.sh",
 		"source pre-runner-script.sh",
@@ -172,9 +174,76 @@ apt-get install -y curl jq git`
 			runnerName,
 		),
 		"echo 'Runner configured successfully'",
+		"",
+		"# Create cleanup script for graceful shutdown",
+		"cat > /usr/local/bin/cleanup-runner.sh << 'EOF'",
+		"#!/bin/bash",
+		"echo 'Starting graceful runner shutdown...'",
+		"",
+		"# Change to runner directory",
+		"cd /actions-runner || exit 1",
+		"",
+		"# Stop the runner gracefully",
+		"if [ -f .runner ]; then",
+		"    echo 'Stopping GitHub Actions Runner...'",
+		"    ./config.sh remove --token $(cat .runner | grep token | cut -d' ' -f2)",
+		"    echo 'Runner removed from GitHub'",
+		"fi",
+		"",
+		"# Kill any remaining runner processes",
+		"pkill -f 'Runner.Listener' || true",
+		"pkill -f 'Runner.Worker' || true",
+		"pkill -f 'run.sh' || true",
+		"",
+		"echo 'Runner cleanup completed'",
+		"EOF",
+		"",
+		"chmod +x /usr/local/bin/cleanup-runner.sh",
+		"",
+		"# Create health check script",
+		"cat > /usr/local/bin/health-check.sh << 'EOF'",
+		"#!/bin/bash",
+		"cd /actions-runner",
+		"if [ -f .runner ]; then",
+		"    echo 'Runner is configured'",
+		"    exit 0",
+		"else",
+		"    echo 'Runner not configured'",
+		"    exit 1",
+		"fi",
+		"EOF",
+		"",
+		"chmod +x /usr/local/bin/health-check.sh",
+		"",
+		"# Set up signal handlers for graceful shutdown",
+		"cleanup() {",
+		"    echo 'Received termination signal, cleaning up...'",
+		"    /usr/local/bin/cleanup-runner.sh",
+		"    exit 0",
+		"}",
+		"",
+		"trap cleanup SIGTERM SIGINT",
+		"",
+		"# Start the runner in background with proper process management",
+		"echo 'Starting GitHub Actions Runner...'",
 		"./run.sh &",
-		"echo 'Runner started in background'",
-		"echo 'GitHub Actions Runner setup completed successfully!'",
+		"RUNNER_PID=$!",
+		"echo $RUNNER_PID > /var/run/github-runner.pid",
+		"echo 'Runner started with PID: $RUNNER_PID'",
+		"",
+		"# Wait for runner to start properly",
+		"sleep 10",
+		"",
+		"# Health check",
+		"if /usr/local/bin/health-check.sh; then",
+		"    echo '✅ GitHub Actions Runner started successfully!'",
+		"else",
+		"    echo '❌ Failed to start GitHub Actions Runner'",
+		"    exit 1",
+		"fi",
+		"",
+		"# Keep the script running to maintain the instance",
+		"wait $RUNNER_PID",
 	}
 
 	return strings.Join(userDataLines, "\n")
@@ -353,50 +422,268 @@ func createEC2Instance(
 	return nil
 }
 
-// terminateEC2Instance terminates the specified EC2 instance
-func terminateEC2Instance(instanceID string) error {
+// terminateEC2Instance terminates the specified EC2 instance with improved error handling
+func terminateEC2Instance(instanceID string, force bool, timeoutSeconds int) error {
 	svc, err := createEC2Client()
 	if err != nil {
 		return err
 	}
 
-	// First, describe the instance to check if it exists
+	// First, describe the instance to check current state
 	describeInput := &ec2.DescribeInstancesInput{
 		InstanceIds: []string{instanceID},
 	}
 
-	_, err = svc.DescribeInstances(context.TODO(), describeInput)
+	result, err := svc.DescribeInstances(context.TODO(), describeInput)
 	if err != nil {
 		return fmt.Errorf("failed to find instance %s: %v", instanceID, err)
 	}
 
-	// Terminate the instance
-	terminateInput := &ec2.TerminateInstancesInput{
-		InstanceIds: []string{instanceID},
+	if len(result.Reservations) == 0 || len(result.Reservations[0].Instances) == 0 {
+		return fmt.Errorf("instance %s not found", instanceID)
 	}
 
-	result, err := svc.TerminateInstances(context.TODO(), terminateInput)
-	if err != nil {
-		return fmt.Errorf("failed to terminate instance %s: %v", instanceID, err)
+	instance := result.Reservations[0].Instances[0]
+	currentState := string(instance.State.Name)
+
+	if outputFormat != "github-actions" {
+		fmt.Printf("📊 Instance %s current state: %s\n", instanceID, currentState)
+
+		// Check if it's a spot instance (Note: InstanceMarketOptions might not be available in all SDK versions)
 	}
 
-	if len(result.TerminatingInstances) > 0 {
-		currentState := string(result.TerminatingInstances[0].CurrentState.Name)
-
+	// Check if instance is already terminated
+	if currentState == "terminated" {
 		if outputFormat == "github-actions" {
 			fmt.Printf("Termination Status: %s\n", currentState)
 		} else {
-			fmt.Printf("✅ Instance %s termination initiated!\n", instanceID)
-			fmt.Printf("Current State: %s\n", currentState)
+			fmt.Printf("ℹ️  Instance %s is already terminated\n", instanceID)
 		}
+		return nil
+	}
 
-		// If currentState is "shutting-down", return. Otherwise, wait until "shutting-down" or "terminated".
-		if currentState == "shutting-down" {
-			return nil
+	// Check if instance is in a terminable state
+	if currentState == "shutting-down" {
+		if outputFormat == "github-actions" {
+			fmt.Printf("Termination Status: %s\n", currentState)
+		} else {
+			fmt.Printf("⏳ Instance %s is already shutting down\n", instanceID)
+		}
+		// Wait for termination to complete
+		return waitForInstanceTermination(svc, instanceID, timeoutSeconds)
+	}
+
+	// Only attempt termination if instance is in running, stopping, or stopped state
+	if currentState != "running" && currentState != "stopping" && currentState != "stopped" {
+		return fmt.Errorf("instance %s is in state '%s' and cannot be terminated", instanceID, currentState)
+	}
+
+	// Attempt graceful termination first
+	if outputFormat != "github-actions" {
+		if force {
+			fmt.Printf("🛑 Force terminating instance %s...\n", instanceID)
+		} else {
+			fmt.Printf("🛑 Initiating graceful termination of instance %s...\n", instanceID)
 		}
 	}
 
-	return nil
+	// For force termination, skip graceful shutdown attempts
+	if !force {
+		// Try graceful termination with retry logic
+		maxRetries := 3
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			if outputFormat != "github-actions" && attempt > 1 {
+				fmt.Printf("🔄 Retry attempt %d/%d...\n", attempt, maxRetries)
+			}
+
+			terminateInput := &ec2.TerminateInstancesInput{
+				InstanceIds: []string{instanceID},
+			}
+
+			terminateResult, err := svc.TerminateInstances(context.TODO(), terminateInput)
+			if err != nil {
+				// Check for specific AWS errors
+				if strings.Contains(err.Error(), "IncorrectInstanceState") {
+					if outputFormat != "github-actions" {
+						fmt.Printf("⚠️  Instance is in a state that prevents termination: %s\n", currentState)
+						fmt.Printf("💡 Try using --force flag for force termination\n")
+					}
+					return fmt.Errorf(
+						"instance %s is in state '%s' and cannot be terminated gracefully",
+						instanceID,
+						currentState,
+					)
+				}
+
+				// For other errors, retry if not the last attempt
+				if attempt < maxRetries {
+					time.Sleep(time.Duration(attempt) * time.Second)
+					continue
+				}
+				return fmt.Errorf("failed to terminate instance %s after %d attempts: %v", instanceID, maxRetries, err)
+			}
+
+			// Success - break out of retry loop
+			if len(terminateResult.TerminatingInstances) > 0 {
+				newState := string(terminateResult.TerminatingInstances[0].CurrentState.Name)
+
+				if outputFormat == "github-actions" {
+					fmt.Printf("Termination Status: %s\n", newState)
+				} else {
+					fmt.Printf("✅ Instance %s termination initiated!\n", instanceID)
+					fmt.Printf("Current State: %s\n", newState)
+				}
+
+				// Wait for termination to complete
+				return waitForInstanceTermination(svc, instanceID, timeoutSeconds)
+			}
+		}
+	} else {
+		// Force termination - try multiple times with different approaches
+		if outputFormat != "github-actions" {
+			fmt.Printf("🔨 Using force termination methods...\n")
+		}
+
+		// Method 1: Standard termination
+		terminateInput := &ec2.TerminateInstancesInput{
+			InstanceIds: []string{instanceID},
+		}
+
+		terminateResult, err := svc.TerminateInstances(context.TODO(), terminateInput)
+		if err == nil && len(terminateResult.TerminatingInstances) > 0 {
+			newState := string(terminateResult.TerminatingInstances[0].CurrentState.Name)
+
+			if outputFormat == "github-actions" {
+				fmt.Printf("Termination Status: %s\n", newState)
+			} else {
+				fmt.Printf("✅ Force termination initiated!\n")
+				fmt.Printf("Current State: %s\n", newState)
+			}
+
+			// Wait for termination to complete
+			forceTimeout := timeoutSeconds / 2
+			if forceTimeout < 120 {
+				forceTimeout = 120 // Minimum 2 minutes for force termination
+			}
+			return waitForInstanceTermination(svc, instanceID, forceTimeout)
+		}
+
+		// Method 2: If standard termination fails, try stop + terminate for stubborn instances
+		if outputFormat != "github-actions" {
+			fmt.Printf("⚡ Standard termination failed, trying stop + terminate...\n")
+		}
+
+		stopInput := &ec2.StopInstancesInput{
+			InstanceIds: []string{instanceID},
+			Force:       aws.Bool(true),
+		}
+
+		_, stopErr := svc.StopInstances(context.TODO(), stopInput)
+		if stopErr != nil {
+			if outputFormat != "github-actions" {
+				fmt.Printf("⚠️  Stop also failed: %v\n", stopErr)
+			}
+		} else {
+			if outputFormat != "github-actions" {
+				fmt.Printf("⏹️  Instance stopped, now terminating...\n")
+			}
+			time.Sleep(10 * time.Second) // Wait for stop to complete
+		}
+
+		// Try termination again after stop
+		terminateResult, err = svc.TerminateInstances(context.TODO(), terminateInput)
+		if err != nil {
+			return fmt.Errorf("force termination failed for instance %s: %v", instanceID, err)
+		}
+
+		if len(terminateResult.TerminatingInstances) > 0 {
+			newState := string(terminateResult.TerminatingInstances[0].CurrentState.Name)
+
+			if outputFormat == "github-actions" {
+				fmt.Printf("Termination Status: %s\n", newState)
+			} else {
+				fmt.Printf("✅ Force termination successful!\n")
+				fmt.Printf("Current State: %s\n", newState)
+			}
+
+			// Wait for termination to complete
+			forceTimeout := timeoutSeconds / 2
+			if forceTimeout < 120 {
+				forceTimeout = 120 // Minimum 2 minutes for force termination
+			}
+			return waitForInstanceTermination(svc, instanceID, forceTimeout)
+		}
+	}
+
+	return fmt.Errorf(
+		"force termination failed for instance %s: unexpected response from terminate instances API",
+		instanceID,
+	)
+}
+
+// waitForInstanceTermination waits for an instance to fully terminate
+func waitForInstanceTermination(svc *ec2.Client, instanceID string, timeoutSeconds int) error {
+	if outputFormat != "github-actions" {
+		fmt.Printf("⏳ Waiting for instance %s to terminate...\n", instanceID)
+	}
+
+	timeout := time.After(time.Duration(timeoutSeconds) * time.Second)
+	ticker := time.NewTicker(10 * time.Second) // Check every 10 seconds
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-timeout:
+			return fmt.Errorf(
+				"timeout waiting for instance %s to terminate after %d seconds",
+				instanceID,
+				timeoutSeconds,
+			)
+
+		case <-ticker.C:
+			describeInput := &ec2.DescribeInstancesInput{
+				InstanceIds: []string{instanceID},
+			}
+
+			result, err := svc.DescribeInstances(context.TODO(), describeInput)
+			if err != nil {
+				// If we can't describe the instance, it might be terminated
+				if strings.Contains(err.Error(), "InvalidInstanceId.NotFound") {
+					if outputFormat != "github-actions" {
+						fmt.Printf("🎉 Instance %s has been terminated!\n", instanceID)
+					}
+					return nil
+				}
+				return fmt.Errorf("error checking instance state: %v", err)
+			}
+
+			if len(result.Reservations) > 0 && len(result.Reservations[0].Instances) > 0 {
+				state := string(result.Reservations[0].Instances[0].State.Name)
+
+				if outputFormat != "github-actions" {
+					fmt.Printf("📊 Instance state: %s\n", state)
+				}
+
+				if state == "terminated" {
+					if outputFormat != "github-actions" {
+						fmt.Printf("🎉 Instance %s has been successfully terminated!\n", instanceID)
+					}
+					return nil
+				}
+
+				// Continue waiting if still terminating
+				if state == "shutting-down" || state == "stopping" {
+					continue
+				}
+
+				// Unexpected state
+				if state != "running" && state != "pending" && state != "stopping" && state != "stopped" &&
+					state != "shutting-down" {
+					return fmt.Errorf("instance %s is in unexpected state: %s", instanceID, state)
+				}
+			}
+		}
+	}
 }
 
 var rootCmd = &cobra.Command{
@@ -467,10 +754,22 @@ var terminateCmd = &cobra.Command{
 			return fmt.Errorf("instance-id is required")
 		}
 
-		if outputFormat != "github-actions" {
-			fmt.Printf("🛑 Terminating EC2 instance %s...\n", instanceID)
+		// Validate timeout range
+		if terminationTimeout < 60 {
+			return fmt.Errorf("timeout must be at least 60 seconds")
 		}
-		return terminateEC2Instance(instanceID)
+		if terminationTimeout > 3600 {
+			return fmt.Errorf("timeout cannot exceed 3600 seconds (1 hour)")
+		}
+
+		if outputFormat != "github-actions" {
+			if forceTerminate {
+				fmt.Printf("🛑 Force terminating EC2 instance %s (timeout: %ds)...\n", instanceID, terminationTimeout)
+			} else {
+				fmt.Printf("🛑 Terminating EC2 instance %s (timeout: %ds)...\n", instanceID, terminationTimeout)
+			}
+		}
+		return terminateEC2Instance(instanceID, forceTerminate, terminationTimeout)
 	},
 }
 
@@ -490,13 +789,18 @@ func init() {
 	createCmd.Flags().StringVar(&runnerName, "runner-name", "", "Name for the GitHub Actions runner")
 	createCmd.Flags().
 		StringVar(&outputFormat, "output-format", "", "Output format (github-actions for GitHub Actions compatibility)")
-	createCmd.Flags().StringVar(&instanceMarketType, "instance-market-type", "on-demand", "Instance market type (on-demand or spot)")
-	createCmd.Flags().StringVar(&spotMaxPrice, "spot-max-price", "", "Maximum price for spot instances (per hour in USD, optional)")
+	createCmd.Flags().
+		StringVar(&instanceMarketType, "instance-market-type", "on-demand", "Instance market type (on-demand or spot)")
+	createCmd.Flags().
+		StringVar(&spotMaxPrice, "spot-max-price", "", "Maximum price for spot instances (per hour in USD, optional)")
 
 	// Terminate command flags
 	terminateCmd.Flags().StringVar(&instanceID, "instance-id", "", "EC2 instance ID to terminate")
 	terminateCmd.Flags().
 		StringVar(&outputFormat, "output-format", "", "Output format (github-actions for GitHub Actions compatibility)")
+	terminateCmd.Flags().BoolVar(&forceTerminate, "force", false, "Force termination even if graceful shutdown fails")
+	terminateCmd.Flags().
+		IntVar(&terminationTimeout, "timeout", 300, "Maximum time in seconds to wait for termination (60-3600, default: 300)")
 
 	// Add commands to root
 	rootCmd.AddCommand(createCmd)
