@@ -30,7 +30,7 @@ jobs:
     steps:
       - name: Start EC2 Runner
         id: start-ec2-runner
-        uses: mseptiaan/gh-workflow@v1.0.0
+        uses: mseptiaan/gh-workflow@v1.0.13
         with:
           mode: start
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -43,7 +43,6 @@ jobs:
             apt-get update -y
             apt-get install -y docker.io
             systemctl start docker
-          aws-region: us-east-1
 
   # Spot Instance Example (Cost-effective but may be interrupted)
   start-spot-runner:
@@ -56,7 +55,7 @@ jobs:
     steps:
       - name: Start Spot Instance Runner
         id: start-spot
-        uses: mseptiaan/gh-workflow@v1.0.0
+        uses: mseptiaan/gh-workflow@v1.0.13
         with:
           mode: start
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -74,19 +73,17 @@ jobs:
             echo "⚡ Running on cost-effective spot instance!"
             echo "💰 Up to 70% cost savings compared to on-demand"
             echo "⚠️  May be interrupted by AWS (2-minute warning)"
-          aws-region: us-east-1
 
   stop-runner:
     if: github.event.inputs.action == 'stop'
     runs-on: ubuntu-latest
     steps:
       - name: Stop EC2 Runner
-        uses: mseptiaan/gh-workflow@v1.0.0
+        uses: mseptiaan/gh-workflow@v1.0.13
         with:
           mode: stop
           github-token: ${{ secrets.GITHUB_TOKEN }}
           instance-id: ${{ github.event.inputs.instance-id }}
-          aws-region: us-east-1
           # Note: If using CLI directly, you can add timeout configuration:
           # --timeout 600        # 10 minute timeout
           # --force              # Force termination for stubborn instances
@@ -131,12 +128,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Stop EC2 Runner
-        uses: mseptiaan/gh-workflow@v1.0.0
+        uses: mseptiaan/gh-workflow@v1.0.13
         with:
           mode: stop
           github-token: ${{ secrets.GITHUB_TOKEN }}
           instance-id: ${{ needs.start-runner.outputs.ec2-instance-id }}
-          aws-region: us-east-1
           # Note: If using CLI directly, you can add timeout configuration:
           # --timeout 600        # 10 minute timeout
           # --force              # Force termination for stubborn instances
@@ -148,12 +144,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Stop Spot EC2 Runner
-        uses: mseptiaan/gh-workflow@v1.0.0
+        uses: mseptiaan/gh-workflow@v1.0.13
         with:
           mode: stop
           github-token: ${{ secrets.GITHUB_TOKEN }}
           instance-id: ${{ needs.start-spot-runner.outputs.ec2-instance-id }}
-          aws-region: us-east-1
           # Note: If using CLI directly, you can add timeout configuration:
           # --timeout 600        # 10 minute timeout
           # --force              # Force termination for stubborn instances

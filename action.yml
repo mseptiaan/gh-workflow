@@ -37,6 +37,13 @@ inputs:
   pre-runner-script:
     description: "Pre-runner script to execute before runner setup"
     required: false
+  instance-market-type:
+    description: "Instance market type (on-demand or spot)"
+    required: false
+    default: "on-demand"
+  spot-max-price:
+    description: "Maximum price for spot instances (per hour in USD, optional)"
+    required: false
   instance-id:
     description: "EC2 instance ID (for stop mode)"
     required: false
@@ -199,18 +206,28 @@ runs:
           
           # Create EC2 instance and capture output
           set +e  # Don't exit on error so we can capture the output
-          OUTPUT=$($BINARY_PATH create \
-            --github-token "${{ inputs.github-token }}" \
-            --image-id "${{ inputs.image-id }}" \
-            --instance-type "${{ inputs.instance-type }}" \
-            --subnet-id "${{ inputs.subnet-id }}" \
-            --security-group "${{ inputs.security-group }}" \
-            --repo-owner "$REPO_OWNER" \
-            --repo-name "$REPO_NAME" \
-            --labels "$LABEL_PREFIX,$UNIQUE_LABEL" \
-            --pre-runner-script "${{ inputs.pre-runner-script }}" \
-            --runner-name "$RUNNER_NAME" \
-            --output-format "github-actions" 2>&1)
+
+          # Build the command with optional spot instance parameters
+          CMD="$BINARY_PATH create \
+            --github-token \"${{ inputs.github-token }}\" \
+            --image-id \"${{ inputs.image-id }}\" \
+            --instance-type \"${{ inputs.instance-type }}\" \
+            --subnet-id \"${{ inputs.subnet-id }}\" \
+            --security-group \"${{ inputs.security-group }}\" \
+            --repo-owner \"$REPO_OWNER\" \
+            --repo-name \"$REPO_NAME\" \
+            --labels \"$LABEL_PREFIX,$UNIQUE_LABEL\" \
+            --pre-runner-script \"${{ inputs.pre-runner-script }}\" \
+            --runner-name \"$RUNNER_NAME\" \
+            --instance-market-type \"${{ inputs.instance-market-type }}\" \
+            --output-format \"github-actions\""
+
+          # Add spot max price if specified
+          if [ -n "${{ inputs.spot-max-price }}" ]; then
+            CMD="$CMD --spot-max-price \"${{ inputs.spot-max-price }}\""
+          fi
+
+          OUTPUT=$(eval $CMD 2>&1)
           EXIT_CODE=$?
           set -e  # Re-enable exit on error
           
