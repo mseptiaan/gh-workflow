@@ -467,10 +467,10 @@ func terminateEC2Instance(instanceID string, force bool, timeoutSeconds int) err
 		if outputFormat == "github-actions" {
 			fmt.Printf("Termination Status: %s\n", currentState)
 		} else {
-			fmt.Printf("⏳ Instance %s is already shutting down\n", instanceID)
+			fmt.Printf("✅ Instance %s is shutting down - success\n", instanceID)
 		}
-		// Wait for termination to complete
-		return waitForInstanceTermination(svc, instanceID, timeoutSeconds)
+		// Return success immediately for shutting-down state
+		return nil
 	}
 
 	// Only attempt termination if instance is in running, stopping, or stopped state
