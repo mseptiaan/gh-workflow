@@ -367,7 +367,38 @@ func createEC2Instance(
 	}
 	result, err := svc.RunInstances(context.TODO(), runInput)
 	if err != nil {
-		return fmt.Errorf("failed to create EC2 instance: %v", err)
+		// Check if this is a spot capacity issue and we were trying spot instances
+		if instanceMarketType == "spot" && strings.Contains(err.Error(), "InsufficientInstanceCapacity") {
+			if outputFormat != "github-actions" {
+				fmt.Printf("⚠️  Spot capacity unavailable, falling back to on-demand instance...\n")
+			}
+
+			// Remove spot instance configuration for fallback
+			runInput.InstanceMarketOptions = nil
+
+			// Update instance market type variable
+			instanceMarketType = "on-demand"
+
+			// Update tags to reflect the fallback
+			for i, tag := range runInput.TagSpecifications[0].Tags {
+				if *tag.Key == "InstanceMarketType" {
+					runInput.TagSpecifications[0].Tags[i].Value = aws.String("on-demand")
+					break
+				}
+			}
+
+			// Retry with on-demand configuration
+			result, err = svc.RunInstances(context.TODO(), runInput)
+			if err != nil {
+				return fmt.Errorf("failed to create EC2 instance (tried spot and on-demand): %v", err)
+			}
+
+			if outputFormat != "github-actions" {
+				fmt.Printf("✅ Successfully created on-demand instance as fallback!\n")
+			}
+		} else {
+			return fmt.Errorf("failed to create EC2 instance: %v", err)
+		}
 	}
 
 	if len(result.Instances) > 0 {
